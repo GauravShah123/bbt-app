@@ -1,0 +1,368 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: "Istok Web", sans-serif;
+    transition: 0.3s;
+}
+
+html{
+    max-width: 100%;
+    max-height: 100%;
+}
+
+body {
+    background: radial-gradient(50% 50%at 50% 50%, #ca1707, #432000),
+        radial-gradient(50% 50%at 50% 50%, #df9c2e 43.59%, #6f3737),
+        radial-gradient(50% 50%at 50% 50%, #000, #6f3737),
+        radial-gradient(50% 50%at 50% 50%, #6f3737, #d03911);
+    background-size: cover;
+    background-repeat: no-repeat;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    padding: 2vh;
+    align-items: center;
+    justify-content: center;
+    gap: 10vh;
+
+}
+
+h1 {
+    font-family: "Jockey One", sans-serif;
+    font-size: 3rem;
+    color: #fff;
+}
+
+.home-image {
+    width: 80vw;
+    max-width: 250px;
+}
+
+.button-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+    align-items: center;
+}
+
+button {
+    padding: 12px 40px;
+    font-size: 1.25rem;
+    width: fit-content;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.primary-button {
+    font-size: 1.5rem;
+    border: #992f1e;
+    outline: #992f1e;
+    font-family: "Jockey One", sans-serif;
+
+}
+
+.primary-button:active {
+    background-color: #e6b13f;
+    color: #992f1e;
+}
+
+
+
+.secondary-button {
+    background: none;
+    color: white;
+    padding: 8px 40px;
+    border: none;
+    outline: none;
+    font-family: "Jockey One", sans-serif;
+
+}
+
+.secondary-button:active {
+    color: #e6b13f;
+
+}
+
+.how-to-play-overlay {
+    width: 100vw;
+    height: 100vh;
+    position: absolute;
+    top: 0;
+    left: 0;
+    background-color: #000000aa;
+}
+
+.how-to-play {
+    width: 80vw;
+    max-width: 350px;
+    background: white;
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    border: 1px solid #eee;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+
+.how-to-play h2 {
+    margin-bottom: 0.5rem;
+    font-family: "Jockey One", sans-serif;
+    font-size: 2rem;
+    margin-right: 3rem;
+}
+
+.close_modal.close_modal {
+    width: 2.5rem;
+    height: 2.5rem;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    border: none;
+    outline: none;
+}
+
+.back{
+    height: 2.5rem;
+    padding: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 0.5rem;
+    left: 0.5rem;
+    border: none;
+    outline: none;
+    /* background-color: #eee; */
+    font-size: 1rem;
+    border-radius: 0.5rem;
+    text-decoration: none;
+    color: #fff;
+}
+
+.back .material-symbols-outlined{
+    font-size: 1rem;
+}
+
+.close_modal:active {
+    background-color: #ddd;
+}
+
+.how-to-play-overlay.dont-show {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.how-to-play.dont-show {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.toast {
+    display: flex;
+    padding: 0.75rem 1rem;
+    background-color: #fff;
+    border-radius: 0.5rem;
+    gap: 0.5rem;
+    font-size: 1.1rem;
+    justify-content: center;
+    align-items: center;
+    position: absolute;
+    top: 2rem;
+    width: calc(100% - 4rem);
+}
+
+.toast p {
+    height: 97.5%;
+}
+
+.toast.error {
+    background-color: #ffc6c6;
+    border: 2px solid #9b0000;
+    color: #9b0000;
+}
+
+.toast .material-symbols-outlined {
+    font-size: 1.1rem;
+}
+
+.toast.dont-show {
+    visibility: none;
+    transform: translateY(-200%);
+    opacity: 0;
+    pointer-events: none;
+}
+
+#teams_container{
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    width: 80vw;
+    max-width: 350px;
+}
+
+.input_row{
+    display: flex;
+    gap: 0.5rem;
+}
+
+.input_row input{
+    font-size: 1.1rem;
+    padding: 0.5rem 0.75rem;
+    flex-grow: 1;
+    border-radius: 4px;
+    border: none;
+    outline: none;
+}
+
+.input_row input:active, .input_row input:focus{
+    background-color: #ddd;
+    border: 2px solid #aaa;
+}
+
+.input_row button{
+    padding: 0.25rem 1rem;
+    border-radius: 4px;
+    border: none;
+    outline: none;
+}
+
+body.gameplay{
+    justify-content: space-between;
+}
+
+.gameplay p{
+    color: #fff;
+}
+
+h1.question{
+    font-size: 2rem;
+    font-weight: normal;
+    text-align: center;
+    margin-bottom: 1rem;
+    padding: 0 1rem;
+}
+
+.options{
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    gap: 1rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.option-button{
+    width: 80vw;
+    max-width: 350px;
+    border: 2px solid transparent;
+    outline: none;
+    background: #ffd67c;
+    color: #000;
+}
+
+.option-button:active{
+    width: 80vw;
+    max-width: 350px;
+    border: 2px solid transparent;
+    outline: none;
+    background: #fff;
+    color: #000;
+    font-weight: bold;
+}
+
+.quick-actions ul{
+    list-style: none;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+}
+
+.quick-actions ul li{
+    background-color: #992f1e;
+    color: white;
+    padding: 8px 12px;
+    border-radius: 4px;
+    text-align: center;
+    cursor: pointer;
+}
+
+.check_modals{
+    pointer-events: none;
+    opacity: 0;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: calc(100% - 4vh);
+    height: 70vh;
+}
+
+.check_modals.show{
+    display: flex;
+    opacity: 1;
+    pointer-events: all;
+    flex-direction: column;
+    background-color: #fff;
+    padding: 1rem;
+    justify-content: space-between;
+    align-items: center;
+    border-radius: 0.5rem;
+
+}
+
+.check_modals button{
+    width: 100%;
+}
+
+.check_modals img{
+    width: 100%;
+}
+
+.check_modals h1{
+    color: #000;
+    position: absolute;
+    top: 11rem;
+}
+
+.check_modals#score{
+    justify-content: start;
+    gap: 1rem;
+}
+
+.scores-chart{
+    width: 100%;
+}
+
+.scores-chart p{
+    color: #000;
+}
+
+.white-text{
+    color: #fff;
+}
+
+.back-to-home{
+    position: absolute;
+    width: calc(100% - 4vh);
+    bottom: 2vh;
+}
+
+.container{
+    width: 100%;
+    padding: 1rem;
+    border-radius: 0.25rem;
+    background-color: #e6b13f;
+}
+
+body.end{
+    justify-content: start;
+    gap: 1rem;
+}

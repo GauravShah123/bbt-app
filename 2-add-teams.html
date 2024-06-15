@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Big Bollywood Trivia - Add teams</title>
+    <link rel="shortcut icon" href="app_icon.svg" type="image/x-icon">
+    <link rel="stylesheet" href="./homemain-page.css" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jockey One:wght@400&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Istok Web:wght@400&display=swap" />
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
+    <link rel="stylesheet" href="style.css">
+    <link rel="manifest" href="/manifest.json">
+    <script src="app.js" defer></script>
+</head>
+
+<body>
+    <h1>Create teams</h1>
+    <div id="teams_container">
+        <div class="input_row">
+            <input type="text" name="team" id="team1" placeholder="Team 1 Name" class="team_input">
+            <button type="button" onclick="removeTeam(this)">-</button>
+        </div>
+        <div class="input_row">
+            <input type="text" name="team" id="team2" placeholder="Team 2 Name" class="team_input">
+            <button type="button" onclick="removeTeam(this)">-</button>
+        </div>
+    </div>
+
+    <div class="button-group">
+        <button class="secondary-button" onclick="addTeam()">Add Team</button>
+        <button class="primary-button"  onclick="startGame()">START GAME</button>
+    </div>
+
+    <a class="back" href="index.html"><span class="material-symbols-outlined">arrow_back_ios</span>Back</a>
+
+
+    <script src="addTeam.js" defer></script>
+
+    <div class="toast error dont-show" id="error1"><span class="material-symbols-outlined">error</span>
+        <p>Must have atleast 2 teams</p>
+    </div>
+    <div class="toast error dont-show" id="error2"><span class="material-symbols-outlined">error</span>
+        <p>Cannot have more than 5 teams</p>
+    </div>
+    <div class="toast error dont-show" id="error3"><span class="material-symbols-outlined">error</span>
+        <p>All teams must have a name</p>
+    </div>
+    <div class="toast error dont-show" id="error4"><span class="material-symbols-outlined">error</span>
+        <p>Team names must be unique</p>
+    </div>
+</body>
+
+</html>

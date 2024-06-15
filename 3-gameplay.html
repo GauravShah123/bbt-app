@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Big Bollywood Trivia - Gameplay</title>
+    <link rel="shortcut icon" href="app_icon.svg" type="image/x-icon">
+    <link rel="stylesheet" href="./homemain-page.css" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jockey One:wght@400&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Istok Web:wght@400&display=swap" />
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
+    <link rel="stylesheet" href="style.css">
+    <link rel="manifest" href="/manifest.json">
+    <script src="app.js" defer></script>
+
+</head>
+
+<body class="gameplay">
+    <p id="current_team">Team: </p>
+    <div class="question-wrapper">
+        <h1 class="question">Who plays the character Zoya in the 2023 film Animal?</h1>
+        <div class="options">
+            <button class="option-button" id="option1" onclick="checkAnswer(option1)">Varun Dhawan</button>
+            <button class="option-button" id="option2" onclick="checkAnswer(option2)">Varun Dhawan</button>
+            <button class="option-button" id="option3" onclick="checkAnswer(option3)">Varun Dhawan</button>
+            <button class="option-button" id="option4" onclick="checkAnswer(option4)">Varun Dhawan</button>
+        </div>
+    </div>
+    <div class="quick-actions">
+        <ul>
+            <li onclick="restart()">Restart Game</li>
+            <li onclick="viewScores()">View Scores</li>
+            <li onclick="endGame()">End Game</li>
+        </ul>
+    </div>
+
+    <div id="correct" class="check_modals">
+        <img src="./speech.png" alt="Correct!">
+        <h1>Shabaash!</h1>
+        <button onclick="hideCheckModals()">Next Question!</button>
+    </div>
+    <div id="incorrect" class="check_modals">
+        <img src="./speech.png" alt="Incorrect!">
+        <h1>Nahi!</h1>
+        <button onclick="hideCheckModals()">Next Question!</button>
+    </div>
+
+    <div id="score" class="check_modals">
+        <h2>Current Scores</h2>
+        <div class="scores-chart"></div>
+        <button class="close_modal" onclick="hideCheckModals()"><span class="material-symbols-outlined"> close</span></button>
+    </div>    
+
+    <script src="questions.js" defer></script>
+    <script src="game2.js" defer></script>
+</body>
+
+</html>
