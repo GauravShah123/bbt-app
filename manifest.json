@@ -1,38 +1,25 @@
 {
-    "name": "Big Bollywood Trivia",
-    "short_name": "BBT",
-    "description": "A fun multiplayer bollywood trivia game. Pair with a cup of chai and fresh pakoras.",
-    "start_url": "/index.html",
-    "id": "/index.html",
-    "display": "standalone",
     "background_color": "#432000",
+    "dir": "ltr",
+    "display": "standalone",
+    "name": "Big Bollywood Trivia",
+    "orientation": "portrait",
+    "scope": "/",
+    "short_name": "BBT",
+    "start_url": "/index.html",
     "theme_color": "#ffffff",
-    "orientation": "portrait", 
     "icons": [
-      {
-        "src": "/app_icon.png",
-        "sizes": "300x300",
-        "type": "image/png"
-      }
+        {
+            "src": "app_icon.svg",
+            "type": "image/x-icon"
+        }
     ],
-    "screenshots": [
-      {
-        "src": "./Screenshot 1 - Mobile.png",
-        "sizes": "886x410",
-        "type": "image/png",
-        "form_factor": "narrow"
-      },
-      {
-        "src": "./Screenshot 2 - Mobile.png",
-        "sizes": "883x405",
-        "type": "image/png",
-        "form_factor": "narrow"
-      },
-      {
-        "src": "./Screenshot 1 - Desktop.png",
-        "sizes": "867x1511",
-        "type": "image/png",
-        "form_factor": "wide"
-      }
+    "id": "bbt",
+    "description": "A fun multiplayer bollywood trivia game. Best paired with a cup of chai and fresh pakoras.",
+    "lang": "en",
+    "categories": [
+        "entertainment",
+        "games",
+        "social"
     ]
-  }
+}
