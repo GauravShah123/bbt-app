@@ -10,7 +10,7 @@
     "theme_color": "#ffffff",
     "icons": [
         {
-            "src": "app_icon.svg",
+            "src": "https://gauravshah123.github.io/bbt-app/app_icon.svg",
             "type": "image/x-icon"
         }
     ],
