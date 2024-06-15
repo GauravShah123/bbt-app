@@ -12,6 +12,11 @@
         {
             "src": "https://gauravshah123.github.io/bbt-app/app_icon.svg",
             "type": "image/x-icon"
+        },
+        {
+            "src": "https://gauravshah123.github.io/bbt-app/android-launchericon-512-512.png",
+            "type": "image/x-icon",
+            "sizes": "512x512"
         }
     ],
     "id": "bbt",
