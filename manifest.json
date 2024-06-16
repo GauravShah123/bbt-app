@@ -4,9 +4,9 @@
     "display": "standalone",
     "name": "Big Bollywood Trivia",
     "orientation": "portrait",
-    "scope": "/",
+    "scope": "https://gauravshah123.github.io/bbt-app/",
     "short_name": "BBT",
-    "start_url": "/index.html",
+    "start_url": "https://gauravshah123.github.io/bbt-app/",
     "theme_color": "#ffffff",
     "icons": [
         {
