@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hybrid Audio</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<main>
+  <div class="seg" id="seg" role="radiogroup" aria-label="Mode">
+    <button type="button" data-mode="auto" role="radio">Auto</button>
+    <button type="button" data-mode="hub" role="radio">Hub</button>
+    <button type="button" data-mode="member" role="radio">Member</button>
+    <button type="button" data-mode="off" role="radio">Off</button>
+  </div>
+
+  <div class="row" id="statusRow">
+    <span class="dot" id="dot"></span>
+    <span class="label" id="label">No call</span>
+    <span class="meta" id="meta"></span>
+  </div>
+
+  <div class="warn" id="warn" hidden></div>
+
+  <div class="meter" id="meter" title="Mic level">
+    <div class="fill" id="meterFill"></div>
+    <div class="marker" id="gainMark"></div>
+  </div>
+
+  <!-- TEST PANEL START -->
+  <details class="test" id="test">
+    <summary>Test</summary>
+    <div class="grid" id="readouts">
+      <span>State</span><b id="r-state">-</b>
+      <span>Gain</span><b id="r-gain">-</b>
+      <span>Mic / floor</span><b id="r-mic">-</b>
+      <span>Remote dB</span><b id="r-remote">-</b>
+      <span>Identified</span><b id="r-ident">-</b>
+      <span>Sources</span><b id="r-src">-</b>
+      <span>RTT</span><b id="r-rtt">-</b>
+      <span>Participating</span><b id="r-part">-</b>
+    </div>
+
+    <div class="sliders" id="sliders"></div>
+
+    <label class="check"><input type="checkbox" id="applyRoom"> Apply to room</label>
+
+    <div class="btns">
+      <button type="button" class="btn" id="copyLog">Copy log</button>
+      <button type="button" class="btn" id="reset">Reset</button>
+    </div>
+
+    <div class="backend">
+      <input type="text" id="backendUrl" placeholder="Backend URL" spellcheck="false" autocomplete="off">
+      <button type="button" class="btn" id="saveBackend">Save</button>
+    </div>
+  </details>
+  <!-- TEST PANEL END -->
+</main>
+<script src="popup.js"></script>
+</body>
+</html>

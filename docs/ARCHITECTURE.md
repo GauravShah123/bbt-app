@@ -182,3 +182,12 @@ warning (auto & !connected, or AudioContext suspended) → `!` red `#dc2626`; of
 
 No audio leaves the machine except through Meet. The relay sees: hashed meeting code, random client ids,
 mic RMS (4 decimals), speaking/remote flags, RTT, test params.
+
+## Implementation notes (deviations found during build)
+
+- VAD: 1 s warm-up where the floor tracks both ways; while speaking the floor still rises at 0.25× so steady noise can't latch "speaking".
+- Leak EMA learns only on non-speaking ticks while remote audio plays into a room silent for `csrcLookbackMs`.
+- Sources classed `room` never count as remote voice or leak, and `room` is sticky (needs re > ro to leave), so in-room audio lingering in Meet can't gate the room.
+- Manual `member` broadcasts amp 0 / speaking false (it transmits nothing, so it must not take a share or mute the Hub).
+- meet-hooks: if CSRCs exist without per-CSRC levels, the receiver's SSRC level is attributed to its most recent CSRC (Meet virtual streams carry one participant at a time) and `identified` stays true.
+- Empty `params` object = reset to defaults. SW also sends `{type:'cfg'}` alongside `config`.
