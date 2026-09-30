@@ -1,4 +1,4 @@
-// End-to-end test: 3 "laptops" (persistent contexts) + local relay + fake Meet page.
+// End-to-end test (v2): 3 "laptops" (persistent contexts) + local relay + fake Meet page.
 //   node test/e2e/run.mjs
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
@@ -16,23 +16,21 @@ const ROOT = path.resolve(here, '../..');
 const EXT = path.join(ROOT, 'extension');
 const FAKE_HTML = fs.readFileSync(path.join(here, 'fake-meet.html'), 'utf8');
 const MEET_URL = 'https://meet.google.com/abc-defg-hij';
+const TOKEN = 'testtoken';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const results = [];
 const errors = [];
 let failed = false;
 
 function report(step, ok, detail = '') {
-  results.push({ step, ok });
   if (!ok) failed = true;
   console.log(`${ok ? 'PASS' : 'FAIL'} ${step}${detail ? ' - ' + detail : ''}`);
 }
 
-async function poll(fn, timeout, interval = 100) {
+async function poll(fn, timeout, interval = 50) {
   const end = Date.now() + timeout;
-  let last;
   while (Date.now() < end) {
-    try { last = await fn(); if (last) return last; } catch (e) { last = null; }
+    try { const r = await fn(); if (r) return r; } catch (e) { /* retry */ }
     await sleep(interval);
   }
   return null;
@@ -50,7 +48,7 @@ function freePort() {
 let relay = null;
 async function startRelay(port) {
   relay = spawn('node', [path.join(ROOT, 'backend/dev-server.js')], {
-    env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PORT: String(port), TEAM_TOKEN: TOKEN }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   relay.stderr.on('data', (d) => process.stderr.write('[relay] ' + d));
   const ok = await poll(async () => (await fetch(`http://127.0.0.1:${port}/health`)).ok, 8000, 100);
@@ -64,7 +62,7 @@ async function stopRelay() {
 
 // ---------- laptops ----------
 const laptops = [];
-async function makeLaptop(i, port) {
+async function makeLaptop(i) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `ha-e2e-${i}-`));
   const context = await chromium.launchPersistentContext(dir, {
     channel: 'chromium', headless: true,
@@ -72,238 +70,282 @@ async function makeLaptop(i, port) {
       '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
       '--autoplay-policy=no-user-gesture-required'],
   });
-  const lp = { i, dir, context, page: null, sw: null, extId: null, name: `L${i}`, closed: false };
-  const hookSW = (sw) => {
-    sw.on('console', (m) => { if (m.type() === 'error') errors.push(`${lp.name} SW console.error: ${m.text()}`); });
-  };
+  const lp = { i, dir, context, page: null, popup: null, sw: null, extId: null, name: 'ABC'[i], tabId: null };
+  const hookSW = (sw) => sw.on('console', (m) => { if (m.type() === 'error') errors.push(`${lp.name} SW console.error: ${m.text()}`); });
   lp.sw = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 15000 });
   hookSW(lp.sw);
   context.on('serviceworker', hookSW);
   lp.extId = new URL(lp.sw.url()).host;
-  // extension APIs are bound slightly after the worker context appears
-  if (!await poll(() => lp.sw.evaluate(() => typeof chrome !== 'undefined' && !!chrome.storage && !!chrome.tabs && !!chrome.action), 5000)) {
+  if (!await poll(() => lp.sw.evaluate(() => typeof chrome !== 'undefined' && !!chrome.storage && !!chrome.tabs && !!chrome.action), 5000, 100)) {
     throw new Error('SW chrome APIs unavailable');
   }
   await context.route('https://meet.google.com/**', (route) =>
     route.fulfill({ status: 200, contentType: 'text/html', body: FAKE_HTML }));
-  await lp.sw.evaluate((url) => chrome.storage.local.set({ backendUrl: url }), `ws://127.0.0.1:${port}`);
   laptops.push(lp);
   return lp;
 }
 
-function hookPage(lp, page) {
-  page.on('pageerror', (e) => errors.push(`${lp.name} pageerror: ${e.message}`));
+function hookPage(lp, page, tag) {
+  page.on('pageerror', (e) => errors.push(`${lp.name} ${tag} pageerror: ${e.message}`));
   page.on('console', (m) => {
     if (m.type() === 'error' || m.text().startsWith('FAKE_MEET_ERROR')) {
-      const loc = m.location() && m.location().url || '';
-      errors.push(`${lp.name} console.${m.type()}: ${m.text()} @${loc}`);
+      errors.push(`${lp.name} ${tag} console.${m.type()}: ${m.text()}`);
     }
   });
 }
 
-async function openMeet(lp) {
-  const page = await lp.context.newPage();
-  hookPage(lp, page);
-  lp.page = page;
-  await page.goto(MEET_URL);
-  return page;
+// Popup-protocol session: an extension page holding an ha-popup port; records status/log messages.
+async function openPopup(lp) {
+  const pg = await lp.context.newPage();
+  hookPage(lp, pg, 'popup');
+  await pg.goto(`chrome-extension://${lp.extId}/popup/popup.html`);
+  await pg.evaluate(() => {
+    window.__status = null; window.__log = null;
+    const port = chrome.runtime.connect({ name: 'ha-popup' });
+    port.onMessage.addListener((m) => {
+      if (m.type === 'status' && m.tabId === window.__tabId) window.__status = m.status;
+      else if (m.type === 'log') window.__log = m.log;
+    });
+    window.__port = port;
+  });
+  lp.popup = pg;
+}
+const popupSend = (lp, msg) => lp.popup.evaluate((m) => window.__port.postMessage(m), msg);
+const ui = (lp, action, arg) => popupSend(lp, { type: 'ui', tabId: lp.tabId, action, arg: arg ?? null });
+const lastStatus = (lp) => lp.popup.evaluate(() => window.__status);
+async function getLog(lp) {
+  await lp.popup.evaluate(() => { window.__log = null; });
+  await popupSend(lp, { type: 'getLog', tabId: lp.tabId });
+  return poll(() => lp.popup.evaluate(() => window.__log), 3000, 50);
 }
 
-const getState = (lp) => lp.page.evaluate(() => {
-  const s = window.__hybridAudio.engine._debug.getState();
-  return {
-    isHub: s.isHub, size: s.room.size, connected: s.room.connected, everConnected: s.room.everConnected,
-    state: s.lastOut && s.lastOut.state, gain: s.curGain, mode: s.mode, inCall: s.meet.inCall, hasConfig: s.hasConfig,
-  };
-});
+// Page-side helpers
+const dbg = (lp) => lp.page.evaluate(() => window.__hybridAudio.main._debug());
+const safeDbg = async (lp) => { try { return await dbg(lp); } catch { return null; } };
 const tabInfo = (lp) => lp.sw.evaluate(async () => {
-  const tabs = await chrome.tabs.query({ url: 'https://meet.google.com/*' });
-  const t = tabs[0];
+  const t = (await chrome.tabs.query({ url: 'https://meet.google.com/*' }))[0];
   if (!t) return null;
   return { id: t.id, muted: !!(t.mutedInfo && t.mutedInfo.muted), badge: await chrome.action.getBadgeText({ tabId: t.id }) };
 });
-const live = () => laptops.filter((l) => !l.closed);
-const safeState = async (lp) => { try { return await getState(lp); } catch { return null; } };
 const safeTab = async (lp) => { try { return await tabInfo(lp); } catch { return null; } };
+const snap = async (ls) => Promise.all(ls.map(async (lp) => ({ ...(await safeDbg(lp)), tab: await safeTab(lp) })));
 
-async function closeLaptopPage(lp) {
-  lp.closed = true;
-  try { await lp.page.close(); } catch {}
-}
+// Deterministic mic levels: wrap the `measure` getter (the real one is non-configurable) on a derived engine object.
+const QUIET = { levelDb: -70, noiseDb: -75, act: false, userMuted: false };
+const LOUD = { levelDb: -20, noiseDb: -60, act: true, healthy: true, userMuted: false };
+const setLevel = (lp, patch) => lp.page.evaluate((p) => {
+  const NS = window.__hybridAudio;
+  if (!window.__ovrInstalled) {
+    const real = NS.engine;
+    const o = Object.create(real);
+    Object.defineProperty(o, 'measure', {
+      configurable: true, enumerable: true,
+      get() { const m = real.measure; return window.__ovr ? Object.assign({}, m, window.__ovr) : m; },
+    });
+    NS.engine = o;
+    window.__ovrInstalled = true;
+  }
+  window.__ovr = p;
+}, patch);
 
-// Popup-protocol helper: open extension page and send through an ha-popup port.
-async function popupSend(lp, msg) {
-  const pg = await lp.context.newPage();
-  pg.on('pageerror', (e) => errors.push(`${lp.name} popup pageerror: ${e.message}`));
-  await pg.goto(`chrome-extension://${lp.extId}/popup/popup.html`);
-  await pg.evaluate((m) => new Promise((res) => {
-    const port = chrome.runtime.connect({ name: 'ha-popup' });
-    port.postMessage(m);
-    setTimeout(res, 300); // let the SW handle it before we drop the port
-    window.__p = port;
-  }), msg);
-  await pg.close();
-}
+const setRemote = (lp, on) => lp.page.evaluate((v) => {
+  const NS = window.__hybridAudio;
+  if (!window.__remStubbed) { NS.hooks.pollRemote = () => window.__rem || { identified: true, sources: [] }; window.__remStubbed = true; }
+  window.__rem = { identified: true, sources: v ? [{ id: 'c999', level: 0.5, ageMs: 5 }] : [] };
+}, on);
+
+const gateSum = (ss) => ss.reduce((a, s) => a + (s && s.gate === 1 ? 1 : 0), 0);
+const fmt = (ss) => JSON.stringify(ss.map((s, k) => s && ({ n: 'ABC'[k], role: s.role, st: s.state, g: s.gate, own: s.owner && s.owner.slice(0, 3), muted: s.tab && s.tab.muted, badge: s.tab && s.tab.badge })));
 
 // ---------- main ----------
 async function main() {
   const port = await freePort();
   console.log(`relay port ${port}`);
   await startRelay(port);
+  const [A, B, C] = [await makeLaptop(0), await makeLaptop(1), await makeLaptop(2)];
 
-  for (let i = 0; i < 3; i++) await makeLaptop(i, port);
-  // verify storage took effect
   for (const lp of laptops) {
-    const v = await lp.sw.evaluate(() => chrome.storage.local.get('backendUrl'));
-    if (v.backendUrl !== `ws://127.0.0.1:${port}`) throw new Error('backendUrl not stored');
+    lp.page = await lp.context.newPage();
+    hookPage(lp, lp.page, 'meet');
+    await lp.page.goto(MEET_URL);
   }
+  for (const lp of laptops) {
+    const ok = await poll(async () => (await lp.page.evaluate(() => {
+      const n = window.__hybridAudio; return !!(n && n.engine && n.main && n.hooks && n.RoomClient && n.coordinator && n.hooks.getMeetState().inCall);
+    })), 8000, 100);
+    if (!ok) throw new Error(`${lp.name}: modules/inCall not ready`);
+    lp.tabId = (await tabInfo(lp)).id;
+    await openPopup(lp);
+    await popupSend(lp, { type: 'subscribe', tabId: lp.tabId });
+    await lp.popup.evaluate((id) => { window.__tabId = id; }, lp.tabId);
+    await popupSend(lp, { type: 'subscribe', tabId: lp.tabId });
+    await popupSend(lp, { type: 'setBackend', url: `ws://127.0.0.1:${port}`, token: TOKEN });
+    await setLevel(lp, QUIET);
+  }
+  // config reaches pages
+  await sleep(300);
 
-  // Step 1/2: open Meet in each, verify injection
-  for (const lp of laptops) await openMeet(lp);
-  let injected = true;
-  for (const lp of laptops) {
-    const ok = await poll(() => lp.page.evaluate(() => !!(window.__hybridAudio && window.__hybridAudio.engine)), 5000);
-    if (!ok) injected = false;
-  }
-  report('1-2 content scripts inject, __hybridAudio exists (main world)', injected);
-  if (!injected) return;
-  const inCallOk = await poll(async () => (await Promise.all(laptops.map(safeState))).every((s) => s && s.inCall), 5000);
-  report('2 fake Meet reaches inCall on all laptops', !!inCallOk);
+  // Step 1
+  let ss = await snap(laptops);
+  report('1 before join: passthrough gate 1, unmuted, badge empty',
+    ss.every((s) => s.gate === 1 && !s.joined && s.tab && s.tab.muted === false && s.tab.badge === ''), fmt(ss));
+
+  // Step 2
+  await ui(A, 'join');
+  const ok2 = await poll(async () => {
+    const s = (await snap([A]))[0]; ss = [s];
+    return s.role === 'hub' && s.state === 'SOLO' && s.gate === 1 && s.tab.muted === false && s.tab.badge === 'HUB';
+  }, 5000);
+  report('2 A joins: hub, SOLO, gate 1, unmuted, badge HUB', !!ok2, fmt(ss));
+  if (!ok2) return;
 
   // Step 3
-  let snap = null;
-  const settled = await poll(async () => {
-    const ss = await Promise.all(laptops.map(safeState));
-    const ts = await Promise.all(laptops.map(safeTab));
-    snap = { ss, ts };
-    const hubs = ss.filter((s) => s && s.isHub).length;
-    return hubs === 1 && ss.every((s) => s && s.size === 3 && s.connected);
-  }, 5000);
-  if (!settled) {
-    report('3a exactly one hub, roomSize 3, all connected', false, JSON.stringify(snap && snap.ss));
-  } else {
-    report('3a exactly one hub, roomSize 3, all connected', true);
-  }
-  // mute + badges (poll: SW round trips take a moment)
-  let mb = null;
-  const muteOk = await poll(async () => {
-    const ss = await Promise.all(laptops.map(safeState));
-    const ts = await Promise.all(laptops.map(safeTab));
-    mb = ss.map((s, k) => ({ hub: s && s.isHub, muted: ts[k] && ts[k].muted, badge: ts[k] && ts[k].badge }));
-    return mb.every((x) => x.hub ? (x.muted === false && x.badge === 'HUB') : (x.muted === true && (x.badge === '·' || x.badge === 'MIC')));
-  }, 5000);
-  report('3b hub unmuted + HUB badge; non-hubs muted + (· or MIC)', !!muteOk, JSON.stringify(mb));
+  await ui(B, 'join'); await sleep(150); await ui(C, 'join');
+  let a3 = null, all3 = null;
+  const ok3 = await poll(async () => {
+    all3 = await snap(laptops);
+    const [a, b, c] = all3; a3 = a;
+    return a.role === 'hub' && a.state === 'ROOM' && a.owner === a.you && a.gate === 1 && a.tab.muted === true &&
+      b.role === 'member' && c.role === 'member' && b.gate === 0 && c.gate === 0 &&
+      b.tab.muted === true && c.tab.muted === true && b.tab.badge === '·' && c.tab.badge === '·' &&
+      a.laptops.length === 3 && a.laptops.every((l) => l.ready);
+  }, 8000);
+  report('3 B,C join: ROOM owner A, A gate1 muted; B,C gate 0 muted badge ·; roster 3 ready', !!ok3,
+    fmt(all3) + (a3 ? ' roster=' + JSON.stringify(a3.laptops.map((l) => [l.label, l.ready])) : ''));
+  if (!ok3) return;
+  const idA = a3.you, idB = all3[1].you, idC = all3[2].you;
 
-  // Step 4
-  const gains = await Promise.all(laptops.map(safeState));
-  console.log('gain/state:', gains.map((g) => g && `${g.isHub ? 'hub' : 'non'} state=${g.state} gain=${g.gain}`).join(' | '));
-  const gainOk = gains.every((g) => g && Number.isFinite(g.gain) && (g.isHub || g.gain <= 1));
-  report('4 gains finite, non-hub <= 1', gainOk);
+  // Step 4: B loud -> owner B
+  const t4 = Date.now();
+  await setLevel(B, LOUD);
+  let s4 = null;
+  const ok4 = await poll(async () => {
+    s4 = await snap(laptops);
+    return s4[0].owner === idB && s4[1].gate === 1 && s4[0].gate === 0 && s4[2].gate === 0;
+  }, 2000);
+  const dt4 = Date.now() - t4;
+  report('4a switch: owner B, gates B=1 A=0 C=0 within 2s', !!ok4, `${dt4}ms ${fmt(s4 || [])}`);
+  const logA = await getLog(A);
+  if (logA) {
+    const L = logA.log;
+    let iOpen = -1, iAck = -1, iClose = -1;
+    for (let i = L.length - 1; i >= 0 && iOpen < 0; i--) if (L[i].k === 'cmd' && L[i].to === idB && L[i].op === 'open') iOpen = i;
+    const gOpen = iOpen >= 0 ? L[iOpen].g : null;
+    for (let i = iOpen + 1; i < L.length; i++) {
+      if (iAck < 0 && L[i].k === 'applied' && L[i].from === idB && L[i].g === gOpen && L[i].gate === 1) iAck = i;
+      if (iClose < 0 && L[i].k === 'cmd' && L[i].to === idA && L[i].op === 'close') iClose = i;
+    }
+    const sw = L.filter((e) => e.k === 'coord' && e.ev === 'switch' && e.to === idB).pop();
+    report('4b overlap order: open(B) acked before close(A) sent', iOpen >= 0 && iAck > iOpen && iClose > iAck, `idx open=${iOpen} ack=${iAck} close=${iClose}`);
+    report('4c switch ms recorded', !!sw, sw ? `switch=${sw.ms.toFixed(0)}ms (hub p50=${logA.summary.switchMs.p50})` : 'no switch event');
+  } else report('4b/4c getLog', false, 'no log');
 
-  // Step 5: hub leaves
-  let hub = laptops.find((l, k) => gains[k] && gains[k].isHub);
-  await closeLaptopPage(hub);
-  let rem = live(), st5 = null;
-  const ok5 = await poll(async () => {
-    const ss = await Promise.all(rem.map(safeState));
-    const ts = await Promise.all(rem.map(safeTab));
-    st5 = ss.map((s, k) => ({ hub: s && s.isHub, size: s && s.size, muted: ts[k] && ts[k].muted }));
-    return st5.filter((x) => x.hub).length === 1 && st5.every((x) => x.size === 2) &&
-      st5.filter((x) => x.hub).every((x) => x.muted === false);
-  }, 3000);
-  report('5 hub leaves: new hub elected & unmuted, roomSize 2', !!ok5, JSON.stringify(st5));
-
-  // Step 6: solo
-  const victim = live().find((l) => true);
-  // close a non-hub-or-hub; the remaining one must be solo
-  await closeLaptopPage(victim);
-  const last = live()[0];
-  let st6 = null;
-  const ok6 = await poll(async () => {
-    const s = await safeState(last), t = await safeTab(last);
-    st6 = { ...s, muted: t && t.muted };
-    return s && s.state === 'solo' && s.gain === 1 && t && t.muted === false;
-  }, 4000);
-  report('6 solo: state solo, gain 1, unmuted', !!ok6, JSON.stringify(st6));
-
-  // Step 7: backend loss. Re-open two laptops (fresh pages).
-  await closeLaptopPage(last);
+  // Step 5: remote
+  // 5a. A (self) must own the mic so the unknown source enrolls as remote: B quiet, A loud.
+  await setLevel(B, QUIET); await setLevel(A, LOUD);
+  let s5 = null;
+  const ok5a = await poll(async () => {
+    s5 = await snap(laptops);
+    return s5[0].state === 'ROOM' && s5[0].owner === idA && s5[0].gate === 1 && s5[1].gate === 0;
+  }, 2500);
+  report('5a A regains ownership (B quiet, A loud)', !!ok5a, fmt(s5 || []));
+  await setLevel(A, QUIET);
+  await setRemote(A, true); // active source, unknown CSRC, owner=self -> enrolls as remote after learnSettleMs + 3 ticks
+  const enrolled = await poll(async () => {
+    const l = await getLog(A);
+    return l && l.log.some((e) => e.k === 'coord' && e.ev === 'enroll' && e.kind === 'remote' && e.id === 'c999');
+  }, 4000, 200);
+  report('5b source c999 enrolled as remote (owner self)', !!enrolled);
+  await setRemote(A, false);
+  const back = await poll(async () => { const s = await safeDbg(A); return s && s.state === 'ROOM' && s.owner === idA && s.gate === 1; }, 3000);
+  report('5c enrollment turn ends -> ROOM, A reopened', !!back);
+  // 5d. B loud again (owner B), then remote speaks
+  await setLevel(B, LOUD);
+  const ownB = await poll(async () => { const s = await safeDbg(A); return s && s.state === 'ROOM' && s.owner === idB; }, 2500);
   await sleep(300);
-  const two = laptops.slice(0, 2);
-  for (const lp of two) { lp.closed = false; await openMeet(lp); }
-  let st7 = null;
-  const up = await poll(async () => {
-    const ss = await Promise.all(two.map(safeState));
-    return ss.filter((s) => s && s.isHub).length === 1 && ss.every((s) => s && s.size === 2 && s.connected);
-  }, 6000);
-  report('7a two laptops reconnected, one hub', !!up);
-  const ss0 = await Promise.all(two.map(safeState));
-  const lastHub = two.find((l, k) => ss0[k] && ss0[k].isHub);
-  const other = two.find((l) => l !== lastHub);
+  const t5 = Date.now();
+  await setRemote(A, true);
+  let s5d = null;
+  const okR = await poll(async () => {
+    s5d = await snap(laptops);
+    return s5d[0].state === 'REMOTE' && gateSum(s5d) === 0 && s5d[0].tab.muted === false;
+  }, 1000, 30);
+  const dtR = Date.now() - t5;
+  report('5d remote floor: REMOTE, all gates 0, A unmuted within 1s', !!(ownB && okR), `${dtR}ms ownB=${!!ownB} ${fmt(s5d || [])}`);
+  await setRemote(A, false);
+  let s5e = null;
+  const okE = await poll(async () => {
+    s5e = await snap(laptops);
+    return s5e[0].state === 'ROOM' && s5e[0].owner === idB && s5e[1].gate === 1 && s5e[0].tab.muted === true;
+  }, 3000);
+  const lg = await getLog(A);
+  const seq = lg && lg.log.filter((e) => e.k === 'coord' && e.ev === 'state').map((e) => e.from + '>' + e.to).join(',');
+  const viaSettling = !!seq && /REMOTE>SETTLING,SETTLING>ROOM$/.test(seq);
+  report('5e remote ends: SETTLING -> ROOM, A muted, B reopened', !!(okE && viaSettling), `${fmt(s5e || [])} seq...${(seq || '').slice(-60)}`);
+
+  // Step 6: A leaves the call
+  await A.page.evaluate(() => { window.__fake.pc1.close(); window.__fake.pc2.close(); });
+  let s6 = null;
+  const ok6 = await poll(async () => {
+    s6 = await snap([B, C]);
+    const [b, c] = s6;
+    return b.role === 'hub' && c.role === 'member' && b.state === 'ROOM' && b.tab.muted === true && gateSum(s6) === 1 &&
+      b.laptops.length === 2;
+  }, 5000);
+  const sA = await safeDbg(A);
+  report('6 hub handover: B hub (ROOM, muted), exactly one gate open', !!ok6, `A.joined=${sA && sA.joined} ${fmt(s6 || [])}`);
+
+  // Step 7: make-hub
+  await setLevel(B, QUIET);
+  await ui(C, 'makeHub');
+  let s7 = null;
+  const ok7 = await poll(async () => {
+    s7 = await snap([B, C]);
+    const [b, c] = s7;
+    return c.role === 'hub' && b.role === 'member' && b.gate === 0 && c.gate === 1 && c.state === 'ROOM' && c.tab.muted === true;
+  }, 5000);
+  report('7 makeHub: C hub, B member gate 0', !!ok7, fmt(s7 || []));
+
+  // Step 8: relay loss
+  await setLevel(B, LOUD);
+  const bOwn = await poll(async () => { const s = await snap([B, C]); return s[0].gate === 1 && s[1].gate === 0 && s[1].owner === idB; }, 3000);
+  if (!bOwn) console.log('warn: B did not become owner before relay kill');
   await stopRelay();
   const tKill = Date.now();
-  const ok7 = await poll(async () => {
-    const ss = await Promise.all(two.map(safeState));
-    const ts = await Promise.all(two.map(safeTab));
-    st7 = ss.map((s, k) => ({ n: two[k].name, hub: two[k] === lastHub, connected: s && s.connected, state: s && s.state, gain: s && s.gain, muted: ts[k] && ts[k].muted }));
-    return st7.every((x) => x.connected === false && x.state === 'fallback') &&
-      st7.every((x) => x.hub ? (x.gain === 1 && x.muted === false) : (x.gain === 0 && x.muted === true));
-  }, 12000);
-  report('7b backend killed: both fallback; last hub gain 1 unmuted, other gain 0 muted', !!ok7, `${Date.now() - tKill}ms ${JSON.stringify(st7)}`);
+  let s8 = null, st8 = null;
+  const ok8 = await poll(async () => {
+    s8 = await snap([B, C]); st8 = await lastStatus(C);
+    const [b, c] = s8;
+    return st8 && st8.pause && st8.pause.reason === 'relay' && c.gate === 0 && c.tab.muted === true && b.gate === 0;
+  }, 3000);
+  report('8a relay killed: hub PAUSED{relay}, gate 0, muted; member gate 0', !!ok8, `${Date.now() - tKill}ms pause=${JSON.stringify(st8 && st8.pause)} ${fmt(s8 || [])}`);
   await startRelay(port);
-  let st7c = null;
-  const ok7c = await poll(async () => {
-    const ss = await Promise.all(two.map(safeState));
-    const ts = await Promise.all(two.map(safeTab));
-    st7c = ss.map((s, k) => ({ n: two[k].name, hub: s && s.isHub, connected: s && s.connected, size: s && s.size, state: s && s.state, muted: ts[k] && ts[k].muted }));
-    return st7c.every((x) => x.connected && x.size === 2) && st7c.filter((x) => x.hub).length === 1 &&
-      st7c.find((x) => x.hub).muted === false && st7c.find((x) => !x.hub).muted === true &&
-      st7c.every((x) => x.state !== 'fallback');
-  }, 10000);
-  report('7c relay restarted: both reconnect, roles recovered', !!ok7c, JSON.stringify(st7c));
-
-  // Step 7d: Test panel "Copy log" path (popup -> SW -> page -> SW -> popup) and setParams reaching the page
-  const tabHub = await safeTab(lastHub);
-  const pg = await lastHub.context.newPage();
-  await pg.goto(`chrome-extension://${lastHub.extId}/popup/popup.html`);
-  const got = await pg.evaluate((tabId) => new Promise((res) => {
-    const port = chrome.runtime.connect({ name: 'ha-popup' });
-    port.onMessage.addListener((m) => { if (m.type === 'log') res(m.log); });
-    port.postMessage({ type: 'subscribe', tabId });
-    port.postMessage({ type: 'setParams', params: { shareExponent: 3 }, room: false });
-    setTimeout(() => port.postMessage({ type: 'getLog', tabId }), 400);
-    setTimeout(() => res(null), 4000);
-  }), tabHub.id);
-  await pg.close();
-  const hasParam = !!(got && got.params && got.params.shareExponent === 3);
-  report('7d Copy log returns log + summary; setParams applied', !!(got && Array.isArray(got.log) && got.log.length && got.summary && hasParam),
-    got ? `entries=${got.log && got.log.length} summaryKeys=${Object.keys(got.summary || {})} shareExponent=${got.params && got.params.shareExponent}` : 'no log');
-
-  // Step 8: mode override on `other` (non-hub in normal circumstances; use whichever is 'other')
-  const tabOther = await safeTab(other);
-  await popupSend(other, { type: 'setMode', tabId: tabOther.id, mode: 'member' });
-  let st8 = null;
-  const ok8a = await poll(async () => {
-    const s = await safeState(other), t = await safeTab(other);
-    st8 = { ...s, muted: t && t.muted };
-    return s && s.mode === 'member' && s.gain === 0 && t && t.muted === true;
-  }, 4000);
-  report('8a member mode: muted, gain 0', !!ok8a, JSON.stringify(st8));
-  await popupSend(other, { type: 'setMode', tabId: tabOther.id, mode: 'off' });
-  let st8b = null;
+  const tUp = Date.now();
+  let s8b = null;
   const ok8b = await poll(async () => {
-    const s = await safeState(other), t = await safeTab(other);
-    const peer = await safeState(lastHub);
-    st8b = { ...s, muted: t && t.muted, peerRoom: peer && peer.size };
-    return s && s.mode === 'off' && s.gain === 1 && t && t.muted === false && peer && peer.size === 1;
-  }, 4000);
-  report('8b off mode: gain 1, unmuted, socket closed (peer roster drops)', !!ok8b, JSON.stringify(st8b));
+    s8b = await snap([B, C]);
+    const hubs = s8b.filter((s) => s.role === 'hub').length;
+    return s8b.every((s) => s.relayUp) && hubs === 1 && gateSum(s8b) === 1 && s8b.every((s) => s.state !== 'PAUSED');
+  }, 14000, 100);
+  report('8b relay restarted: reconnect, one hub, one gate open', !!ok8b, `${Date.now() - tUp}ms ${fmt(s8b || [])}`);
 
-  // Step 9
+  // Step 9: B leaves
+  await ui(B, 'leave');
+  let s9 = null;
+  const ok9 = await poll(async () => {
+    s9 = await snap([B, C]);
+    const [b, c] = s9;
+    return !b.joined && b.gate === 1 && b.tab.muted === false && b.tab.badge === '' &&
+      c.laptops.length === 1 && !c.laptops.some((l) => l.id === idB);
+  }, 5000);
+  report('9 B leaves: passthrough, unmuted, badge empty; roster drops B', !!ok9, fmt(s9 || []) + ' roster(C)=' + JSON.stringify(s9 && s9[1].laptops && s9[1].laptops.map((l) => l.label)));
+
+  // Step 10
   await sleep(500);
-  const bad = errors.filter((e) => /chrome-extension:|hybridAudio|policy\.js|engine\.js|meet-hooks|bridge\.js|background\.js|SW /.test(e));
-  if (errors.length) console.log('collected errors:\n  ' + errors.join('\n  '));
-  report('9 no uncaught extension errors', bad.length === 0, bad.join(' || '));
+  // Browser-level network noise while the relay is down is expected, not an extension error.
+  const bad = errors.filter((e) => !/WebSocket connection to|ERR_CONNECTION_REFUSED|Failed to load resource/.test(e));
+  if (errors.length) console.log('collected console/page errors:\n  ' + errors.join('\n  '));
+  report('10 no uncaught extension errors', bad.length === 0, bad.join(' || '));
 }
 
 let code = 0;

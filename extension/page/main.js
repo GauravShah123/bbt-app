@@ -642,7 +642,18 @@
       }, STATUS_MS);
     }
 
-    var api = { onMeetState: onMeetState };
+    // Read-only debug accessor (used by test/e2e/run.mjs).
+    function _debug() {
+      var st = buildStatus(), e = eng();
+      var hub = role === 'hub';
+      return {
+        joined: !!joined, role: joined ? role : null, state: st.state, owner: hub ? (lastOut && lastOut.owner || null) : (lastHb && lastHb.o || null),
+        epoch: client ? client.epoch : null, sid: client ? client.sid : null, you: client ? client.you : null,
+        gate: e ? e.gateApplied : null, laptops: st.laptops, pause: st.pause, relayUp: st.relayUp, tabMuted: tabMuted
+      };
+    }
+
+    var api = { onMeetState: onMeetState, _debug: _debug };
     Object.defineProperty(NS, 'main', { value: api, enumerable: false, configurable: true, writable: true });
     init();
   } catch (e) {

@@ -171,6 +171,11 @@ Rules:
   - Otherwise ambiguous: reset its counters.
   - In SOUNDCHECK: all gates closed (acked), tab unmuted, up to 8 s. Any active fresh unknown source for enrollTicks → remote. Exit to SETTLING.
   - `resetIds` clears both maps.
+  - Enrollment also runs in SOLO.
+  - **Self-correction.** The rule: a room laptop's CSRC carries audio only while that laptop's gate is open.
+    - A learned room CSRC active more than `verifyLatencyMs` (1 s) after its laptop's gate closed → reclassified as remote.
+    - A remote turn can be triggered within `newOwnerWindowMs` (3 s) of a member taking the mic while that member is talking. If that turn ends within `verifyWindowMs` (2 s) and the member is still talking, the trigger CSRCs are reclassified as that member's, and it gets the mic back.
+    - This fixes the "laptop was in the Meet before clicking Join" mis-enrollment after one short glitch.
 - **Failures.**
   - `onLost(owner)`, or of a member with an open or pending gate → PAUSED{ownerLost}: close everything reachable, tab muted.
   - `onLost` of a closed member → drop it.
