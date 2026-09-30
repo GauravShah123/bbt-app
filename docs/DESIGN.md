@@ -1,7 +1,24 @@
 # Hybrid Audio for Google Meet: Design Review
 
-**Status:** in build · **Reviewer ask:** sanity-check the approach, the risks, and the open questions at the end.
-Detailed module contracts: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+**Status:** v2 in build · Detailed module contracts: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
+## v2 revision (after senior review): what changed and why
+
+v1 (sections 3–7 below) used distributed gain sharing: every laptop set its own mic gain, and each laptop decided the floor on its own. After review, we moved to **Hub-coordinated single-mic selection**.
+
+| v1 | v2 | Why |
+|---|---|---|
+| Every laptop decides for itself | **The Hub is the only decision-maker**; handoffs wait for confirmation (open/close → applied) | No split-brain; two mics are never open because two laptops disagreed |
+| Gain sharing (all mics partly open) | **One mic open**, kept open between speakers until a challenger is 6 dB better for 100 ms | No doubled/comb-filtered voice at all; the mic already open still carries a new speaker's first words |
+| Remote detection by "active while the room is silent" | **Remote enrollment by elimination:** while the Hub owns the mic, any active incoming CSRC is remote (the Hub never receives its own audio, and member gates are closed). Room CSRCs are learned while a member owns the mic. Sound check as a fallback | Deterministic rather than a silence heuristic |
+| Leak guard | Removed: room break-in is not allowed during a remote turn | Simpler; avoids the hard problem |
+| Auto-join by Meet code | **One click, "Join room audio,"** per laptop per meeting; auto-rejoin on reload | Confirms physical presence (a teammate dialing in from home) |
+| Fallback to plain Meet on errors | **Pause safely** (gates closed) with explicit recovery actions | Never risk an echo loop |
+| Automatic Hub election | The first joiner is Hub; **automatic handover on intentional leave** (including leaving the Meet); unexpected Hub loss pauses with "Take over as Hub" | The team reshuffles breakouts every 15–20 minutes; the Hub's owner leaving must not need manual recovery |
+| Relay socket in the service worker | Socket in the page's content script (direct), with the SW as proxy fallback | Avoid SW lifecycle issues; fallback in case Meet's CSP blocks it |
+| — | **Meet audio is never replaced.** Only in-room mic input (gate) and in-room speaker output (tab mute) are touched. No playback buffer | Lowest coupling to Meet internals; the cost is ~40 ms + one round trip of the remote person's first word lost on interruptions |
+
+Everything below is the original v1 analysis, kept for the record. Section 4's comparison of alternatives still applies.
 
 ## 1. Problem
 
