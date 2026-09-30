@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hybrid Audio for Meet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minimum_chrome_version": "116",
   "permissions": ["storage"],
   "host_permissions": ["https://meet.google.com/*"],
@@ -14,7 +14,7 @@
   "content_scripts": [
     {
       "matches": ["https://meet.google.com/*"],
-      "js": ["page/policy.js", "page/engine.js", "page/meet-hooks.js"],
+      "js": ["page/coordinator.js", "page/audio-engine.js", "page/meet-hooks.js", "page/room-client.js", "page/main.js"],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": false
@@ -25,5 +25,8 @@
       "run_at": "document_start",
       "all_frames": false
     }
+  ],
+  "web_accessible_resources": [
+    { "resources": ["page/meter-worklet.js"], "matches": ["https://meet.google.com/*"] }
   ]
 }

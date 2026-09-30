@@ -4,79 +4,146 @@
 
   let tabId = null;
   let isMeet = false;
-  let mode = 'auto';
   let status = null;
+  let settings = { backendUrl: '', tokenSet: false, params: {} };
   let port = null;
 
   const fmt = (n, d = 0) => (typeof n === 'number' && isFinite(n) ? n.toFixed(d) : '-');
 
-  // ---------- render ----------
-  function renderMode() {
-    for (const b of $('seg').children) {
-      b.setAttribute('aria-checked', String(b.dataset.mode === mode));
-      b.disabled = !isMeet;
+  const ACTION_LABELS = {
+    hubOnly: 'Use Hub only',
+    resume: 'Resume',
+    soundCheck: 'Sound check',
+    continueSolo: 'Continue on this laptop',
+    takeOver: 'Take over as Hub',
+  };
+
+  function send(m) {
+    try { port && port.postMessage(m); } catch (e) {}
+  }
+
+  function ui(action, arg) {
+    send({ type: 'ui', tabId, action, arg: arg ?? null });
+  }
+
+  function laptopOf(s, id) {
+    return (s.laptops || []).find((l) => l && l.id === id);
+  }
+
+  function reasonText(s) {
+    const p = s.pause;
+    if (!p) return '';
+    switch (p.reason) {
+      case 'relay': return 'Relay lost';
+      case 'ownerLost': {
+        const l = p.id != null ? laptopOf(s, p.id) : (s.laptops || []).find((x) => x && x.lost);
+        return `${l ? l.label : 'Laptop'} lost`;
+      }
+      case 'ackTimeout': return 'No confirmation';
+      case 'unhealthy': return 'Audio not running';
+      default: return 'Paused';
     }
   }
 
-  function derive() {
-    const s = status;
-    const m = (s && s.mode) || mode;
-    if (!isMeet || !s || !s.inCall) return { c: 'gray', label: 'No call', meta: '' };
-    if (m === 'off') return { c: 'gray', label: 'Off', meta: '' };
-    const meta = s.roomSize > 0 ? `${s.roomSize} in room` : typeof s.rtt === 'number' && s.rtt > 0 ? `rtt ${Math.round(s.rtt)}ms` : '';
-    if (s.state === 'solo') return { c: 'gray', label: 'Solo', meta };
-    if (s.isHub) return { c: 'green', label: 'Hub', meta };
-    if (s.state === 'remote') return { c: 'amber', label: 'Remote talking', meta };
-    if ((s.gain || 0) > 0.3) return { c: 'blue', label: 'Mic live', meta };
-    return { c: 'gray', label: 'Mic off', meta };
+  function actionList(s) {
+    const out = [];
+    for (const a of Array.isArray(s.actions) ? s.actions : []) {
+      const name = typeof a === 'string' ? a : a && a.action;
+      if (!name) continue;
+      if (name === 'dropLost') {
+        const id = (a && a.id) ?? (s.pause && s.pause.id) ?? ((s.laptops || []).find((l) => l && l.lost) || {}).id;
+        const l = id != null ? laptopOf(s, id) : null;
+        out.push({ name, arg: id ?? null, label: `Continue without ${l ? l.label : 'laptop'}` });
+      } else if (ACTION_LABELS[name]) out.push({ name, arg: null, label: ACTION_LABELS[name] });
+    }
+    return out;
   }
 
-  function warning() {
-    const s = status;
-    if (!isMeet || !s || !s.inCall) return '';
-    const m = s.mode || mode;
-    if (m === 'off') return '';
-    if (s.ctxState === 'suspended') return 'Click the Meet tab to enable audio';
-    if (s.everConnected && !s.connected) return 'Connection lost · fallback';
-    if (m === 'auto' && !s.backendConfigured) return 'No backend · pick Hub or Member';
-    if (m === 'auto' && !s.everConnected && !s.connected) return 'Offline · pick Hub or Member';
-    return '';
-  }
-
-  const dbPct = (db) => (typeof db === 'number' && isFinite(db) ? Math.max(0, Math.min(1, (db + 70) / 70)) * 100 : 0);
-
+  // ---------- render ----------
   function render() {
-    renderMode();
-    const d = derive();
-    $('dot').dataset.c = d.c;
-    $('label').textContent = d.label;
-    $('meta').textContent = d.meta;
-    const w = warning();
-    $('warn').hidden = !w;
-    $('warn').textContent = w;
-    const s = status && isMeet ? status : null;
-    $('meterFill').style.width = (s ? dbPct(s.selfDb) : 0) + '%';
-    const mk = $('gainMark');
-    if (s && typeof s.gain === 'number') {
-      mk.style.display = 'block';
-      mk.style.left = `calc(${s.gain > 0 ? dbPct(20 * Math.log10(s.gain)) : 0}% - 1px)`;
-    } else mk.style.display = 'none';
+    const s = isMeet && status && status.inCall ? status : null;
+    const joined = !!(s && s.joined);
+    $('none').hidden = !!s;
+    $('join').hidden = !(s && !joined);
+    $('joined').hidden = !joined;
+    if (s && !joined) $('joinWarn').hidden = s.backendConfigured != null ? !!s.backendConfigured : !!settings.backendUrl;
+    if (joined) renderJoined(s);
     renderReadouts();
   }
 
-  /* TEST PANEL START */
+  function renderJoined(s) {
+    const role = s.role === 'member' ? 'member' : 'hub';
+    const chip = $('role');
+    chip.dataset.role = role;
+    chip.textContent = role === 'hub' ? 'Hub' : 'Member';
+    const n = (s.laptops || []).length;
+    $('count').textContent = `${n} laptop${n === 1 ? '' : 's'}`;
+    $('owner').textContent = s.ownerLabel || '-';
+    const f = s.floor === 'remote' ? 'remote' : s.floor === 'room' ? 'room' : null;
+    const pill = $('floor');
+    pill.hidden = !f;
+    if (f) {
+      pill.dataset.f = f;
+      pill.textContent = f === 'remote' ? 'Remote' : 'Room';
+    }
+
+    const ul = $('laptops');
+    ul.textContent = '';
+    for (const l of s.laptops || []) {
+      const li = document.createElement('li');
+      li.dataset.lost = l.lost ? '1' : '0';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = l.label || '-';
+      const dots = document.createElement('span');
+      dots.className = 'dots';
+      for (const [k, on, t] of [['hub', l.hub, 'Hub'], ['owner', l.owner, 'Mic'], ['ready', l.ready, 'Ready'], ['lost', l.lost, 'Lost']]) {
+        const d = document.createElement('i');
+        if (on) {
+          d.className = 'd';
+          d.dataset.k = k;
+          d.title = t;
+        }
+        dots.append(d);
+      }
+      li.append(name, dots);
+      ul.append(li);
+    }
+
+    const reason = reasonText(s);
+    const acts = actionList(s);
+    $('issue').hidden = !reason && !acts.length;
+    $('reason').hidden = !reason;
+    $('reason').textContent = reason;
+    const host = $('acts');
+    host.textContent = '';
+    for (const a of acts) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn';
+      b.textContent = a.label;
+      b.addEventListener('click', () => ui(a.name, a.arg));
+      host.append(b);
+    }
+    $('makeHubBtn').hidden = role !== 'member';
+  }
+
+  /* DEBUG PANEL START */
   const DEFAULTS = {
-    shareExponent: 2, idleDuckDb: -12, vadOnsetDb: 9,
-    remoteOnDb: -50, remoteOnMs: 300, remoteHoldMs: 500, roomHoldMs: 500,
+    switchAdvantageDb: 6, switchSustainMs: 100, minOwnMs: 300,
+    remoteOnDb: -50, remoteOnMs: 40, remoteHoldMs: 300, settleMs: 150,
+    vadOnsetDb: 9, minSpeechDb: -55, handoffOverlap: 1,
   };
   const SLIDERS = [
-    ['shareExponent', 'shareExponent', 1, 4, 0.5],
-    ['idleDuckDb', 'idleDuckDb', -30, 0, 1],
-    ['vadOnsetDb', 'vadOnsetDb', 4, 16, 1],
-    ['remoteOnDb', 'remoteOnDb', -70, -30, 1],
-    ['remoteOnMs', 'remoteOnMs', 100, 800, 10],
-    ['remoteHoldMs', 'remoteHoldMs', 200, 1500, 10],
-    ['roomHoldMs', 'roomHoldMs', 200, 1500, 10],
+    ['switchAdvantageDb', 2, 12, 0.5],
+    ['switchSustainMs', 40, 400, 10],
+    ['minOwnMs', 100, 1000, 10],
+    ['remoteOnDb', -70, -30, 1],
+    ['remoteOnMs', 20, 200, 5],
+    ['remoteHoldMs', 100, 1000, 10],
+    ['settleMs', 50, 500, 10],
+    ['vadOnsetDb', 4, 16, 1],
+    ['minSpeechDb', -70, -30, 1],
   ];
   const sliderEls = {};
   let sending = null;
@@ -84,11 +151,11 @@
 
   function buildSliders() {
     const host = $('sliders');
-    for (const [key, label, min, max, step] of SLIDERS) {
+    for (const [key, min, max, step] of SLIDERS) {
       const wrap = document.createElement('label');
       wrap.className = 'sl';
       const name = document.createElement('span');
-      name.textContent = label;
+      name.textContent = key;
       const out = document.createElement('output');
       const input = document.createElement('input');
       input.type = 'range';
@@ -97,14 +164,19 @@
       out.textContent = input.value;
       input.addEventListener('input', () => {
         out.textContent = input.value;
-        pending[key] = Number(input.value);
-        clearTimeout(sending);
-        sending = setTimeout(flushParams, 120);
+        queue(key, Number(input.value));
       });
       wrap.append(name, out, input);
       host.append(wrap);
       sliderEls[key] = { input, out };
     }
+    $('handoffOverlap').addEventListener('change', () => queue('handoffOverlap', $('handoffOverlap').checked ? 1 : 0));
+  }
+
+  function queue(key, val) {
+    pending[key] = val;
+    clearTimeout(sending);
+    sending = setTimeout(flushParams, 120);
   }
 
   function flushParams() {
@@ -119,46 +191,30 @@
       if (key in pending) continue;
       const v = p && typeof p[key] === 'number' ? p[key] : DEFAULTS[key];
       sliderEls[key].input.value = v;
-      sliderEls[key].out.textContent = String(v);
+      sliderEls[key].out.textContent = String(sliderEls[key].input.value);
     }
-  }
-
-  function srcSummary(src) {
-    if (typeof src === 'number') return String(src);
-    let list = [];
-    if (Array.isArray(src)) list = src.map((x) => (x && (x.cls || x.class || x.kind)) || 'unknown');
-    else if (src && typeof src === 'object') list = Object.values(src).map((x) => (typeof x === 'string' ? x : (x && (x.cls || x.class)) || 'unknown'));
-    else return '-';
-    const n = { remote: 0, room: 0, unknown: 0 };
-    for (const c of list) n[c in n ? c : 'unknown']++;
-    return `${n.remote}R ${n.room}M ${n.unknown}?`;
+    if (!('handoffOverlap' in pending)) {
+      const h = p && typeof p.handoffOverlap === 'number' ? p.handoffOverlap : DEFAULTS.handoffOverlap;
+      $('handoffOverlap').checked = !!h;
+    }
   }
 
   function renderReadouts() {
     const s = status && isMeet ? status : null;
+    const e = (s && s.engine) || {};
+    const r = (s && s.remote) || {};
     const set = (id, v) => { $(id).textContent = v; };
-    set('r-state', s ? `${s.state || '-'}${s.isHub ? ' (hub)' : ''}` : '-');
-    set('r-gain', s ? fmt(s.gain, 2) : '-');
-    set('r-mic', s ? `${fmt(s.selfDb, 0)} / ${fmt(s.floorDb, 0)} dB` : '-');
-    set('r-remote', s ? `${fmt(s.remoteDb, 0)} dB` : '-');
-    set('r-ident', s ? String(!!s.identified) : '-');
-    set('r-src', s ? srcSummary(s.sources) : '-');
+    set('r-state', s ? String(s.state || '-') : '-');
+    set('r-gate', s && e.gate != null ? String(e.gate) : '-');
+    set('r-level', s ? `${fmt(e.levelDb)} / ${fmt(e.noiseDb)} dB` : '-');
+    set('r-act', s && e.act != null ? String(e.act ? 1 : 0) : '-');
+    set('r-meter', s ? String(e.meter || '-') : '-');
+    set('r-via', s ? String(s.via || '-') : '-');
     set('r-rtt', s && typeof s.rtt === 'number' ? `${Math.round(s.rtt)} ms` : '-');
-    set('r-part', s ? String(!!s.participating) : '-');
-  }
-
-  function initTestPanel() {
-    buildSliders();
-    $('reset').addEventListener('click', () => {
-      for (const k in pending) delete pending[k];
-      send({ type: 'resetParams' });
-      applyParams({});
-    });
-    $('copyLog').addEventListener('click', () => send({ type: 'getLog', tabId }));
-    $('saveBackend').addEventListener('click', () => {
-      send({ type: 'setBackend', url: $('backendUrl').value.trim() });
-      flash($('saveBackend'), 'Saved');
-    });
+    set('r-sid', s ? `${s.sid ? String(s.sid).slice(0, 6) : '-'} / ${s.epoch ?? '-'}` : '-');
+    set('r-ident', s ? String(!!r.identified) : '-');
+    set('r-enrolled', s ? `${r.enrolled ?? '-'} / ${r.learnedRoom ?? '-'}` : '-');
+    set('r-ctx', s ? String(e.ctxState || '-') : '-');
   }
 
   function flash(btn, text) {
@@ -179,40 +235,50 @@
     }
   }
 
-  function onParams(msg) {
-    applyParams(msg.params || {});
-    if (document.activeElement !== $('backendUrl')) $('backendUrl').value = msg.backendUrl || '';
+  function onSettings(msg) {
+    settings = { backendUrl: msg.backendUrl || '', tokenSet: !!msg.tokenSet, params: msg.params || {} };
+    applyParams(settings.params);
+    if (document.activeElement !== $('backendUrl')) $('backendUrl').value = settings.backendUrl;
+    if (document.activeElement !== $('token')) $('token').placeholder = settings.tokenSet ? 'Token (set)' : 'Token';
+    render();
   }
-  /* TEST PANEL END */
+
+  function initDebug() {
+    buildSliders();
+    $('resetParams').addEventListener('click', () => {
+      for (const k in pending) delete pending[k];
+      send({ type: 'resetParams' });
+      applyParams({});
+    });
+    $('resetIds').addEventListener('click', () => { ui('resetIds'); flash($('resetIds'), 'Done'); });
+    $('copyLog').addEventListener('click', () => send({ type: 'getLog', tabId }));
+    $('saveBackend').addEventListener('click', () => {
+      send({ type: 'setBackend', url: $('backendUrl').value.trim(), token: $('token').value.trim() });
+      $('token').value = '';
+      flash($('saveBackend'), 'Saved');
+    });
+  }
+  /* DEBUG PANEL END */
 
   // ---------- wiring ----------
-  function send(m) {
-    try { port && port.postMessage(m); } catch (e) {}
-  }
-
   function onMessage(msg) {
     if (!msg) return;
     if (msg.type === 'status') {
       if (msg.tabId !== tabId) return;
       status = msg.status;
-      if (msg.mode) mode = msg.mode;
       render();
     } else if (msg.type === 'log') {
       onLog(msg);
-    } else if (msg.type === 'params') {
-      onParams(msg);
+    } else if (msg.type === 'settings') {
+      onSettings(msg);
     }
   }
 
   async function init() {
-    initTestPanel();
-    $('seg').addEventListener('click', (e) => {
-      const b = e.target.closest('button');
-      if (!b || b.disabled) return;
-      mode = b.dataset.mode;
-      renderMode();
-      send({ type: 'setMode', tabId, mode });
-    });
+    initDebug();
+    $('joinBtn').addEventListener('click', () => ui('join'));
+    $('leaveBtn').addEventListener('click', () => ui('leave'));
+    $('makeHubBtn').addEventListener('click', () => ui('makeHub'));
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       tabId = tab ? tab.id : null;

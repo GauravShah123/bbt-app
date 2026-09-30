@@ -196,9 +196,10 @@
         var st = getMeetState();
         var key = (st.meeting || '') + '|' + (st.inCall ? 1 : 0);
         if (key === lastKey) return;
+        var main = NS.main;
+        if (!main || typeof main.onMeetState !== 'function') return; // retry on the next poll
         lastKey = key;
-        var eng = getEngine();
-        if (eng && typeof eng.onMeetState === 'function') eng.onMeetState(st);
+        main.onMeetState(st);
       } catch (e) {}
     }
 

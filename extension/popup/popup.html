@@ -7,55 +7,69 @@
 </head>
 <body>
 <main>
-  <div class="seg" id="seg" role="radiogroup" aria-label="Mode">
-    <button type="button" data-mode="auto" role="radio">Auto</button>
-    <button type="button" data-mode="hub" role="radio">Hub</button>
-    <button type="button" data-mode="member" role="radio">Member</button>
-    <button type="button" data-mode="off" role="radio">Off</button>
-  </div>
+  <p class="none" id="none">No Meet call</p>
 
-  <div class="row" id="statusRow">
-    <span class="dot" id="dot"></span>
-    <span class="label" id="label">No call</span>
-    <span class="meta" id="meta"></span>
-  </div>
+  <section class="view" id="join" hidden>
+    <button type="button" class="primary" id="joinBtn">Join room audio</button>
+    <div class="warn" id="joinWarn" hidden>Set backend in Debug</div>
+  </section>
 
-  <div class="warn" id="warn" hidden></div>
+  <section class="view" id="joined" hidden>
+    <div class="row head">
+      <span class="chip" id="role">Hub</span>
+      <span class="meta" id="count">1 laptop</span>
+    </div>
+    <div class="row">
+      <span class="k">Mic</span>
+      <span class="v" id="owner">-</span>
+      <span class="pill" id="floor">Room</span>
+    </div>
+    <ul class="laptops" id="laptops"></ul>
+    <div class="issue" id="issue" hidden>
+      <div class="warn" id="reason" hidden></div>
+      <div class="acts" id="acts"></div>
+    </div>
+    <div class="foot">
+      <button type="button" class="link" id="leaveBtn">Leave</button>
+      <button type="button" class="link" id="makeHubBtn">Make this the Hub</button>
+    </div>
+  </section>
 
-  <div class="meter" id="meter" title="Mic level">
-    <div class="fill" id="meterFill"></div>
-    <div class="marker" id="gainMark"></div>
-  </div>
-
-  <!-- TEST PANEL START -->
-  <details class="test" id="test">
-    <summary>Test</summary>
+  <!-- DEBUG PANEL START -->
+  <details class="debug" id="debug">
+    <summary>Debug</summary>
     <div class="grid" id="readouts">
       <span>State</span><b id="r-state">-</b>
-      <span>Gain</span><b id="r-gain">-</b>
-      <span>Mic / floor</span><b id="r-mic">-</b>
-      <span>Remote dB</span><b id="r-remote">-</b>
-      <span>Identified</span><b id="r-ident">-</b>
-      <span>Sources</span><b id="r-src">-</b>
+      <span>Gate</span><b id="r-gate">-</b>
+      <span>Level / noise</span><b id="r-level">-</b>
+      <span>Act</span><b id="r-act">-</b>
+      <span>Meter</span><b id="r-meter">-</b>
+      <span>Via</span><b id="r-via">-</b>
       <span>RTT</span><b id="r-rtt">-</b>
-      <span>Participating</span><b id="r-part">-</b>
+      <span>Sid / epoch</span><b id="r-sid">-</b>
+      <span>Identified</span><b id="r-ident">-</b>
+      <span>Enrolled / learned</span><b id="r-enrolled">-</b>
+      <span>Ctx</span><b id="r-ctx">-</b>
     </div>
 
     <div class="sliders" id="sliders"></div>
 
+    <label class="check"><input type="checkbox" id="handoffOverlap"> handoffOverlap</label>
     <label class="check"><input type="checkbox" id="applyRoom"> Apply to room</label>
 
     <div class="btns">
       <button type="button" class="btn" id="copyLog">Copy log</button>
-      <button type="button" class="btn" id="reset">Reset</button>
+      <button type="button" class="btn" id="resetIds">Reset IDs</button>
+      <button type="button" class="btn" id="resetParams">Reset params</button>
     </div>
 
     <div class="backend">
       <input type="text" id="backendUrl" placeholder="Backend URL" spellcheck="false" autocomplete="off">
+      <input type="password" id="token" placeholder="Token" spellcheck="false" autocomplete="off">
       <button type="button" class="btn" id="saveBackend">Save</button>
     </div>
   </details>
-  <!-- TEST PANEL END -->
+  <!-- DEBUG PANEL END -->
 </main>
 <script src="popup.js"></script>
 </body>

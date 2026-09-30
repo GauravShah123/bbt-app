@@ -1,61 +1,21 @@
-// Service worker: per-tab state, relay WebSocket, tab mute, badge, popup port.
-import { BACKEND_URL } from './config.js';
+// Service worker v2: settings, per-tab joined memory, tab mute executor, badge, popup port, WebSocket proxy.
+import { BACKEND_URL, TEAM_TOKEN } from './config.js';
 
 const MEET_PREFIX = 'https://meet.google.com/';
-const BACKOFF = [500, 1000, 2000, 4000, 8000];
-const POPUP_MIN_MS = 230;
+const POPUP_MIN_MS = 150;
 const LOG_TIMEOUT_MS = 2000;
+const ID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
 /** @type {Map<number, any>} */
 const tabs = new Map();
 const popups = new Set(); // {port, tabId, last}
 const pendingLogs = new Map(); // reqId -> {popup, tabId, timer}
-const keyCache = new Map();
 
-let params = {};
-let backendUrl = '';
+let settings = { backendUrl: '', token: '', params: {} };
 let globalsReady = null;
 let logSeq = 0;
 
-function loadGlobals() {
-  if (!globalsReady) {
-    globalsReady = chrome.storage.local
-      .get(['params', 'backendUrl'])
-      .then((r) => {
-        params = r && r.params && typeof r.params === 'object' ? r.params : {};
-        backendUrl = typeof (r && r.backendUrl) === 'string' ? r.backendUrl : '';
-      })
-      .catch(() => {});
-  }
-  return globalsReady;
-}
-
 // ---------- helpers ----------
-function wsBase() {
-  let u = (backendUrl || BACKEND_URL || '').trim();
-  if (!u) return '';
-  u = u.replace(/\/+$/, '');
-  if (/^https:/i.test(u)) u = 'wss:' + u.slice(6);
-  else if (/^http:/i.test(u)) u = 'ws:' + u.slice(5);
-  return u;
-}
-
-function randomId(n = 16) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(n));
-  let s = '';
-  for (let i = 0; i < n; i++) s += chars[bytes[i] % chars.length];
-  return s;
-}
-
-async function roomKey(code) {
-  if (keyCache.has(code)) return keyCache.get(code);
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('hybrid-audio:' + code));
-  const hex = [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
-  keyCache.set(code, hex);
-  return hex;
-}
-
 function safe(fn) {
   return (...a) => {
     try {
@@ -65,11 +25,43 @@ function safe(fn) {
   };
 }
 
+function normalizeUrl(u) {
+  u = String(u || '').trim().replace(/\/+$/, '');
+  if (!u) return '';
+  if (/^https:/i.test(u)) u = 'wss:' + u.slice(6);
+  else if (/^http:/i.test(u)) u = 'ws:' + u.slice(5);
+  return u;
+}
+
+function randomId(n = 16) {
+  const bytes = crypto.getRandomValues(new Uint8Array(n));
+  let s = '';
+  for (let i = 0; i < n; i++) s += ID_CHARS[bytes[i] % ID_CHARS.length];
+  return s;
+}
+
 function sessionSet(o) {
   try { return chrome.storage.session.set(o).catch(() => {}); } catch (e) {}
 }
 function sessionRemove(k) {
   try { return chrome.storage.session.remove(k).catch(() => {}); } catch (e) {}
+}
+
+function loadGlobals() {
+  if (!globalsReady) {
+    globalsReady = chrome.storage.local
+      .get(['backendUrl', 'token', 'params'])
+      .then((r) => {
+        r = r || {};
+        settings = {
+          backendUrl: normalizeUrl(typeof r.backendUrl === 'string' && r.backendUrl ? r.backendUrl : BACKEND_URL),
+          token: typeof r.token === 'string' && r.token ? r.token : TEAM_TOKEN || '',
+          params: r.params && typeof r.params === 'object' ? r.params : {},
+        };
+      })
+      .catch(() => {});
+  }
+  return globalsReady;
 }
 
 // ---------- tab state ----------
@@ -78,23 +70,14 @@ function getTab(tabId) {
   if (st) return st;
   st = {
     tabId,
-    mode: 'auto',
     cid: null,
-    meeting: null,
-    inCall: false,
+    jm: null, // joined memory {meeting, wasHub}
     status: null,
-    ws: null,
-    wsMeeting: null,
-    seq: 0,
-    backoffIdx: 0,
-    reconnectTimer: null,
-    pingTimer: null,
-    lastMuted: false,
-    weMuted: false,
     port: null,
-    connected: false,
-    everConnected: false,
-    room: { you: null, hub: null, peers: [] },
+    weMuted: false,
+    muteChain: Promise.resolve(),
+    lastMuted: null,
+    ws: null, // proxy socket
     badge: null,
     ready: null,
   };
@@ -107,15 +90,15 @@ async function hydrate(st) {
   const id = st.tabId;
   try {
     await loadGlobals();
-    const k = [`mode:${id}`, `cid:${id}`, `wm:${id}`];
+    const k = [`cid:${id}`, `jm:${id}`, `wm:${id}`];
     const r = (await chrome.storage.session.get(k)) || {};
-    const m = r[k[0]];
-    if (m === 'auto' || m === 'hub' || m === 'member' || m === 'off') st.mode = m;
-    if (typeof r[k[1]] === 'string' && r[k[1]].length >= 8) st.cid = r[k[1]];
+    if (typeof r[k[0]] === 'string' && /^[A-Za-z0-9]{16}$/.test(r[k[0]])) st.cid = r[k[0]];
     else {
       st.cid = randomId(16);
-      sessionSet({ [k[1]]: st.cid });
+      sessionSet({ [k[0]]: st.cid });
     }
+    const jm = r[k[1]];
+    if (jm && typeof jm.meeting === 'string' && jm.meeting) st.jm = { meeting: jm.meeting, wasHub: !!jm.wasHub };
     st.weMuted = !!r[k[2]];
   } catch (e) {
     if (!st.cid) st.cid = randomId(16);
@@ -127,180 +110,103 @@ function sendPage(st, msg) {
   try { st.port.postMessage(msg); } catch (e) {}
 }
 
-function sendConfig(st) {
-  sendPage(st, { type: 'config', mode: st.mode, params, backendConfigured: !!wsBase() });
-  sendPage(st, { type: 'cfg', params });
-}
-
-function pref(st) {
-  return st.mode === 'hub' || st.mode === 'member' ? st.mode : 'auto';
-}
-
-function eligible(st) {
-  return st.mode !== 'off' && !!st.meeting && st.inCall && !!wsBase();
-}
-
-// ---------- relay socket ----------
-function clearSocketTimers(st) {
-  clearInterval(st.pingTimer);
-  st.pingTimer = null;
-}
-
-function sendRoom(st) {
+async function sendConfig(st) {
+  await st.ready;
   sendPage(st, {
-    type: 'room',
-    connected: st.connected,
-    everConnected: st.everConnected,
-    you: st.room.you,
-    hub: st.room.hub,
-    peers: st.room.peers,
+    type: 'config',
+    backendUrl: settings.backendUrl,
+    token: settings.token,
+    params: settings.params,
+    workletUrl: chrome.runtime.getURL('page/meter-worklet.js'),
+    autoJoin: st.jm ? { meeting: st.jm.meeting, wasHub: st.jm.wasHub } : null,
+    cid: st.cid,
   });
 }
 
-function closeSocket(st, { reset = false } = {}) {
-  st.seq++;
-  clearTimeout(st.reconnectTimer);
-  st.reconnectTimer = null;
-  clearSocketTimers(st);
+// ---------- WebSocket proxy (per tab) ----------
+function proxyClose(st) {
   const ws = st.ws;
   st.ws = null;
-  st.wsMeeting = null;
-  const was = st.connected;
-  st.connected = false;
-  if (ws) {
-    ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
-    try { ws.close(); } catch (e) {}
-  }
-  if (reset) {
-    st.everConnected = false;
-    st.room = { you: null, hub: null, peers: [] };
-    st.backoffIdx = 0;
-  }
-  if (ws || was || reset) sendRoom(st);
+  if (!ws) return;
+  ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+  try { ws.close(); } catch (e) {}
 }
 
-function wsSend(st, obj) {
-  if (st.ws && st.ws.readyState === 1) {
-    try { st.ws.send(JSON.stringify(obj)); return true; } catch (e) {}
+function proxyOpen(st, url) {
+  proxyClose(st);
+  const base = settings.backendUrl;
+  if (typeof url !== 'string' || !base || !url.startsWith(base)) {
+    sendPage(st, { type: 'wsproxy', ev: 'error' });
+    sendPage(st, { type: 'wsproxy', ev: 'close', code: 1008 });
+    return;
   }
-  return false;
-}
-
-async function openSocket(st) {
-  if (st.ws || !eligible(st)) return;
-  const seq = ++st.seq;
-  const meeting = st.meeting;
-  let key;
-  try {
-    await st.ready;
-    key = await roomKey(meeting);
-  } catch (e) { return; }
-  if (seq !== st.seq || st.ws || !eligible(st) || st.meeting !== meeting) return;
   let ws;
   try {
-    ws = new WebSocket(`${wsBase()}/room/${key}?id=${encodeURIComponent(st.cid)}&p=${pref(st)}`);
+    ws = new WebSocket(url);
   } catch (e) {
-    scheduleReconnect(st);
+    sendPage(st, { type: 'wsproxy', ev: 'error' });
+    sendPage(st, { type: 'wsproxy', ev: 'close', code: 1006 });
     return;
   }
   st.ws = ws;
-  st.wsMeeting = meeting;
-  ws.onopen = safe(() => {
-    if (st.ws !== ws) return;
-    clearInterval(st.pingTimer);
-    st.pingTimer = setInterval(() => wsSend(st, { t: 'ping', ts: Date.now() }), 2000);
-    wsSend(st, { t: 'ping', ts: Date.now() });
-  });
+  ws.onopen = safe(() => { if (st.ws === ws) sendPage(st, { type: 'wsproxy', ev: 'open' }); });
   ws.onmessage = safe((ev) => {
-    if (st.ws !== ws) return;
-    let m;
-    try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (!m || typeof m !== 'object') return;
-    switch (m.t) {
-      case 'roster':
-        st.connected = true;
-        st.everConnected = true;
-        st.backoffIdx = 0;
-        st.room = {
-          you: m.you ?? null,
-          hub: m.hub ?? null,
-          peers: Array.isArray(m.peers) ? m.peers : [],
-        };
-        sendRoom(st);
-        updateBadge(st);
-        break;
-      case 'st':
-        sendPage(st, { type: 'peer', id: m.id, a: m.a, s: m.s, r: m.r, rt: m.rt });
-        break;
-      case 'pong':
-        if (typeof m.ts === 'number') sendPage(st, { type: 'rtt', ms: Math.max(0, Date.now() - m.ts) });
-        break;
-      case 'cfg':
-        if (m.params && typeof m.params === 'object') {
-          params = { ...params, ...m.params };
-          chrome.storage.local.set({ params }).catch(() => {});
-          pushParamsAll();
-        }
-        break;
-    }
+    if (st.ws === ws && typeof ev.data === 'string') sendPage(st, { type: 'wsproxy', ev: 'message', data: ev.data });
   });
-  ws.onclose = safe(() => {
+  ws.onerror = safe(() => { if (st.ws === ws) sendPage(st, { type: 'wsproxy', ev: 'error' }); });
+  ws.onclose = safe((ev) => {
     if (st.ws !== ws) return;
     st.ws = null;
-    st.wsMeeting = null;
-    st.connected = false;
-    clearSocketTimers(st);
-    sendRoom(st);
-    updateBadge(st);
-    scheduleReconnect(st);
+    sendPage(st, { type: 'wsproxy', ev: 'close', code: ev.code });
   });
-  ws.onerror = () => {};
 }
 
-function scheduleReconnect(st) {
-  if (st.reconnectTimer || !eligible(st)) return;
-  const d = BACKOFF[Math.min(st.backoffIdx, BACKOFF.length - 1)];
-  st.backoffIdx++;
-  st.reconnectTimer = setTimeout(() => {
-    st.reconnectTimer = null;
-    openSocket(st);
-  }, d);
-}
-
-function evaluate(st) {
-  if (!eligible(st)) {
-    if (st.ws || st.connected || st.reconnectTimer) closeSocket(st, { reset: !st.meeting || !st.inCall });
-    return;
+function onWsProxy(st, msg) {
+  switch (msg.op) {
+    case 'open': proxyOpen(st, msg.url); break;
+    case 'send':
+      if (st.ws && st.ws.readyState === 1 && typeof msg.data === 'string') {
+        try { st.ws.send(msg.data); } catch (e) {}
+      }
+      break;
+    case 'close': proxyClose(st); break;
   }
-  if (st.ws && st.wsMeeting !== st.meeting) closeSocket(st, { reset: true });
-  if (!st.ws) openSocket(st);
 }
 
 // ---------- tab mute ----------
-async function applyMute(st, muted) {
-  st.lastMuted = muted;
-  if (st.mode === 'off') muted = false;
-  try {
-    const tab = await chrome.tabs.get(st.tabId);
-    const actual = !!(tab.mutedInfo && tab.mutedInfo.muted);
-    if (muted) {
-      if (!actual) {
-        await chrome.tabs.update(st.tabId, { muted: true });
-        st.weMuted = true;
-        sessionSet({ [`wm:${st.tabId}`]: true });
+function doMute(st, muted, reqId) {
+  st.muteChain = st.muteChain
+    .then(async () => {
+      let actual;
+      try {
+        const tab = await chrome.tabs.get(st.tabId);
+        const was = !!(tab.mutedInfo && tab.mutedInfo.muted);
+        actual = was;
+        if (was !== muted) {
+          const t = await chrome.tabs.update(st.tabId, { muted });
+          actual = t && t.mutedInfo ? !!t.mutedInfo.muted : muted;
+          if (muted && actual) {
+            st.weMuted = true;
+            sessionSet({ [`wm:${st.tabId}`]: true });
+          }
+        }
+        if (!muted && !actual && st.weMuted) {
+          st.weMuted = false;
+          sessionSet({ [`wm:${st.tabId}`]: false });
+        }
+      } catch (e) {
+        actual = st.lastMuted === null ? !muted : st.lastMuted;
       }
-    } else if (st.weMuted) {
-      if (actual) await chrome.tabs.update(st.tabId, { muted: false });
-      st.weMuted = false;
-      sessionSet({ [`wm:${st.tabId}`]: false });
-    }
-  } catch (e) {}
+      st.lastMuted = actual;
+      sendPage(st, { type: 'muted', muted: actual, reqId });
+    })
+    .catch(() => {});
 }
 
 async function restoreMute(st) {
-  st.lastMuted = false;
   if (!st.weMuted) return;
   st.weMuted = false;
+  st.lastMuted = null;
   sessionSet({ [`wm:${st.tabId}`]: false });
   try { await chrome.tabs.update(st.tabId, { muted: false }); } catch (e) {}
 }
@@ -308,12 +214,12 @@ async function restoreMute(st) {
 // ---------- badge ----------
 function computeBadge(st) {
   const s = st.status;
-  if (st.mode === 'off' || !st.inCall) return ['', '#71717a'];
-  if (!s) return ['', '#71717a'];
-  const connected = s.connected ?? st.connected;
-  if ((st.mode === 'auto' && !connected) || s.ctxState === 'suspended') return ['!', '#dc2626'];
-  if (s.isHub) return ['HUB', '#16a34a'];
-  if ((s.gain ?? 0) > 0.3) return ['MIC', '#2563eb'];
+  if (!s || !s.inCall || !s.joined) return ['', '#71717a'];
+  const acts = Array.isArray(s.actions) ? s.actions.map((a) => (typeof a === 'string' ? a : a && a.action)) : [];
+  if (s.pause || acts.some((a) => a && a !== 'soundCheck')) return ['!', '#dc2626'];
+  if (s.role === 'hub') return ['HUB', '#16a34a'];
+  const mine = s.ownerLabel === 'You' || (Array.isArray(s.laptops) && s.laptops.some((l) => l && l.label === 'You' && l.owner));
+  if (s.role === 'member' && mine) return ['MIC', '#2563eb'];
   return ['·', '#71717a'];
 }
 
@@ -328,19 +234,6 @@ function updateBadge(st) {
   } catch (e) {}
 }
 
-// ---------- cleanup ----------
-function cleanup(tabId, { unmute = true } = {}) {
-  const st = tabs.get(tabId);
-  if (st) {
-    closeSocket(st);
-    if (unmute) restoreMute(st);
-    tabs.delete(tabId);
-    try { chrome.action.setBadgeText({ tabId, text: '' }).catch(() => {}); } catch (e) {}
-  }
-  sessionRemove([`mode:${tabId}`, `cid:${tabId}`, `wm:${tabId}`]);
-  pushStatus(tabId, null);
-}
-
 // ---------- popups ----------
 function pushStatus(tabId, status, force) {
   const now = Date.now();
@@ -348,55 +241,55 @@ function pushStatus(tabId, status, force) {
     if (p.tabId !== tabId) continue;
     if (!force && status && now - p.last < POPUP_MIN_MS) continue;
     p.last = now;
-    const st = tabs.get(tabId);
-    try { p.port.postMessage({ type: 'status', tabId, status, mode: st ? st.mode : 'auto' }); } catch (e) {}
+    try { p.port.postMessage({ type: 'status', tabId, status }); } catch (e) {}
   }
 }
 
-function paramsMsg() {
-  return { type: 'params', params, backendUrl, backendConfigured: !!wsBase() };
+function settingsMsg() {
+  return { type: 'settings', backendUrl: settings.backendUrl, tokenSet: !!settings.token, params: settings.params };
 }
 
-function pushParamsAll() {
-  for (const st of tabs.values()) sendConfig(st);
+function pushSettingsAll(exceptTabId) {
+  for (const st of tabs.values()) if (st.tabId !== exceptTabId) sendConfig(st);
   for (const p of popups) {
-    try { p.port.postMessage(paramsMsg()); } catch (e) {}
+    try { p.port.postMessage(settingsMsg()); } catch (e) {}
   }
+}
+
+// ---------- cleanup ----------
+function cleanup(tabId, { unmute = true } = {}) {
+  const st = tabs.get(tabId);
+  if (st) {
+    proxyClose(st);
+    if (unmute) restoreMute(st);
+    tabs.delete(tabId);
+    try { chrome.action.setBadgeText({ tabId, text: '' }).catch(() => {}); } catch (e) {}
+  }
+  sessionRemove([`cid:${tabId}`, `jm:${tabId}`, `wm:${tabId}`]);
+  pushStatus(tabId, null, true);
 }
 
 // ---------- tab port ----------
-async function onTabMessage(st, port, msg) {
+async function onTabMessage(st, msg) {
   await st.ready;
   if (!msg || typeof msg !== 'object') return;
   switch (msg.type) {
-    case 'meet': {
-      const meeting = typeof msg.meeting === 'string' && msg.meeting ? msg.meeting : null;
-      const inCall = !!msg.inCall && !!meeting;
-      const changed = meeting !== st.meeting;
-      st.meeting = meeting;
-      const left = st.inCall && !inCall;
-      st.inCall = inCall;
-      if (changed) closeSocket(st, { reset: true });
-      if (left) restoreMute(st);
-      evaluate(st);
-      updateBadge(st);
-      break;
-    }
-    case 'st':
-      wsSend(st, { t: 'st', a: msg.a, s: msg.s, r: msg.r, rt: msg.rt });
-      break;
-    case 'mute':
-      if (st.inCall || !msg.muted) applyMute(st, !!msg.muted);
-      break;
-    case 'status': {
+    case 'wsproxy': onWsProxy(st, msg); break;
+    case 'mute': doMute(st, !!msg.muted, msg.reqId); break;
+    case 'status':
       st.status = msg;
-      if (typeof msg.inCall === 'boolean' && msg.meeting !== undefined) {
-        // page status is informational; meet message drives eligibility
-      }
       updateBadge(st);
       pushStatus(st.tabId, msg);
       break;
-    }
+    case 'joined':
+      if (msg.joined && typeof msg.meeting === 'string' && msg.meeting) {
+        st.jm = { meeting: msg.meeting, wasHub: !!msg.wasHub };
+        sessionSet({ [`jm:${st.tabId}`]: st.jm });
+      } else {
+        st.jm = null;
+        sessionRemove(`jm:${st.tabId}`);
+      }
+      break;
     case 'logDump': {
       const p = pendingLogs.get(msg.reqId);
       if (p) {
@@ -406,12 +299,11 @@ async function onTabMessage(st, port, msg) {
       }
       break;
     }
-    case 'cfg':
+    case 'cfgOut':
       if (msg.params && typeof msg.params === 'object') {
-        params = { ...params, ...msg.params };
-        chrome.storage.local.set({ params }).catch(() => {});
-        pushParamsAll();
-        wsSend(st, { t: 'cfg', params: msg.params });
+        settings.params = { ...settings.params, ...msg.params };
+        chrome.storage.local.set({ params: settings.params }).catch(() => {});
+        pushSettingsAll(st.tabId);
       }
       break;
   }
@@ -424,22 +316,20 @@ chrome.runtime.onConnect.addListener(
       if (typeof tabId !== 'number') return;
       const st = getTab(tabId);
       st.port = port;
-      port.onMessage.addListener(safe((m) => onTabMessage(st, port, m)));
+      port.onMessage.addListener(safe((m) => onTabMessage(st, m)));
       port.onDisconnect.addListener(
         safe(() => {
           try { void chrome.runtime.lastError; } catch (e) {}
           if (st.port !== port) return;
           st.port = null;
-          st.meeting = null;
-          st.inCall = false;
           st.status = null;
-          closeSocket(st, { reset: true });
+          proxyClose(st);
           restoreMute(st);
           updateBadge(st);
           pushStatus(st.tabId, null, true);
         })
       );
-      st.ready.then(safe(() => sendConfig(st)));
+      sendConfig(st);
     } else if (port.name === 'ha-popup') {
       const pop = { port, tabId: null, last: 0 };
       popups.add(pop);
@@ -450,7 +340,7 @@ chrome.runtime.onConnect.addListener(
         })
       );
       port.onMessage.addListener(safe((m) => onPopupMessage(pop, m)));
-      loadGlobals().then(safe(() => port.postMessage(paramsMsg())));
+      loadGlobals().then(safe(() => port.postMessage(settingsMsg())));
     }
   })
 );
@@ -461,41 +351,33 @@ async function onPopupMessage(pop, msg) {
   await loadGlobals();
   switch (msg.type) {
     case 'subscribe': {
+      if (typeof msg.tabId !== 'number') break;
       pop.tabId = msg.tabId;
       const st = tabs.get(msg.tabId);
-      if (st) await st.ready;
-      else if (typeof msg.tabId === 'number') {
-        // lazily read persisted mode without creating state for non-Meet tabs
-        try {
-          const r = await chrome.storage.session.get(`mode:${msg.tabId}`);
-          const m = r[`mode:${msg.tabId}`];
-          pop.port.postMessage({ type: 'status', tabId: msg.tabId, status: null, mode: m || 'auto' });
-          break;
-        } catch (e) {}
-      }
       pushStatus(msg.tabId, st ? st.status : null, true);
       break;
     }
-    case 'setMode':
-      await setMode(msg.tabId, msg.mode);
-      pushStatus(msg.tabId, tabs.get(msg.tabId)?.status ?? null, true);
+    case 'ui': {
+      const st = tabs.get(msg.tabId);
+      if (st && typeof msg.action === 'string') sendPage(st, { type: 'ui', action: msg.action, arg: msg.arg ?? null });
       break;
+    }
     case 'setParams': {
       if (!msg.params || typeof msg.params !== 'object') break;
-      params = { ...params, ...msg.params };
-      await chrome.storage.local.set({ params });
-      pushParamsAll();
+      settings.params = { ...settings.params, ...msg.params };
+      await chrome.storage.local.set({ params: settings.params });
+      pushSettingsAll();
       if (msg.room) {
-        const target = tabs.get(pop.tabId);
-        if (target) wsSend(target, { t: 'cfg', params: msg.params });
-        else for (const st of tabs.values()) wsSend(st, { t: 'cfg', params: msg.params });
+        const st = tabs.get(pop.tabId);
+        // deviation: page applies these to the room via its own socket
+        if (st) sendPage(st, { type: 'ui', action: 'applyRoom', arg: msg.params });
       }
       break;
     }
     case 'resetParams':
-      params = {};
+      settings.params = {};
       await chrome.storage.local.remove('params');
-      pushParamsAll();
+      pushSettingsAll();
       break;
     case 'getLog': {
       const st = tabs.get(msg.tabId);
@@ -513,42 +395,25 @@ async function onPopupMessage(pop, msg) {
       break;
     }
     case 'setBackend': {
-      const url = typeof msg.url === 'string' ? msg.url.trim() : '';
+      const url = normalizeUrl(msg.url);
+      const token = typeof msg.token === 'string' ? msg.token.trim() : null;
       if (url) await chrome.storage.local.set({ backendUrl: url });
       else await chrome.storage.local.remove('backendUrl');
-      backendUrl = url;
-      for (const st of tabs.values()) {
-        closeSocket(st, { reset: true });
-        evaluate(st);
-      }
-      pushParamsAll();
+      // empty token field keeps the current token; send a value to replace it
+      if (token) await chrome.storage.local.set({ token });
+      settings.backendUrl = url || normalizeUrl(BACKEND_URL);
+      if (token) settings.token = token;
+      else if (!settings.token) settings.token = TEAM_TOKEN || '';
+      pushSettingsAll();
       break;
     }
   }
 }
 
-async function setMode(tabId, mode) {
-  if (!['auto', 'hub', 'member', 'off'].includes(mode) || typeof tabId !== 'number') return;
-  const st = getTab(tabId);
-  await st.ready;
-  st.mode = mode;
-  await sessionSet({ [`mode:${tabId}`]: mode });
-  sendConfig(st);
-  if (mode === 'off') {
-    closeSocket(st, { reset: true });
-    restoreMute(st);
-  } else if (st.ws) {
-    wsSend(st, { t: 'p', p: pref(st) });
-  } else {
-    evaluate(st);
-  }
-  updateBadge(st);
-}
-
-// ---------- tabs events ----------
+// ---------- tab events ----------
 chrome.tabs.onRemoved.addListener(safe((tabId) => cleanup(tabId, { unmute: false })));
 chrome.tabs.onUpdated.addListener(
   safe((tabId, info) => {
-    if (info.url && !info.url.startsWith(MEET_PREFIX) && (tabs.has(tabId))) cleanup(tabId);
+    if (info.url && !info.url.startsWith(MEET_PREFIX)) cleanup(tabId);
   })
 );
