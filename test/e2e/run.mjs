@@ -128,7 +128,7 @@ const tabInfo = (lp) => lp.sw.evaluate(async () => {
   return { id: t.id, muted: !!(t.mutedInfo && t.mutedInfo.muted), badge: await chrome.action.getBadgeText({ tabId: t.id }) };
 });
 const safeTab = async (lp) => { try { return await tabInfo(lp); } catch { return null; } };
-const snap = async (ls) => Promise.all(ls.map(async (lp) => ({ ...(await safeDbg(lp)), tab: await safeTab(lp) })));
+const snap = async (ls) => Promise.all(ls.map(async (lp) => ({ nm: lp.name, ...(await safeDbg(lp)), tab: await safeTab(lp) })));
 
 // Deterministic mic levels: wrap the `measure` getter (the real one is non-configurable) on a derived engine object.
 const QUIET = { levelDb: -70, noiseDb: -75, act: false, userMuted: false };
@@ -155,7 +155,7 @@ const setRemote = (lp, on) => lp.page.evaluate((v) => {
 }, on);
 
 const gateSum = (ss) => ss.reduce((a, s) => a + (s && s.gate === 1 ? 1 : 0), 0);
-const fmt = (ss) => JSON.stringify(ss.map((s, k) => s && ({ n: 'ABC'[k], role: s.role, st: s.state, g: s.gate, own: s.owner && s.owner.slice(0, 3), muted: s.tab && s.tab.muted, badge: s.tab && s.tab.badge })));
+const fmt = (ss) => JSON.stringify(ss.map((s, k) => s && ({ n: s.nm, role: s.role, st: s.state, g: s.gate, own: s.owner && s.owner.slice(0, 3), muted: s.tab && s.tab.muted, badge: s.tab && s.tab.badge })));
 
 // ---------- main ----------
 async function main() {
@@ -328,6 +328,20 @@ async function main() {
     return s8b.every((s) => s.relayUp) && hubs === 1 && gateSum(s8b) === 1 && s8b.every((s) => s.state !== 'PAUSED');
   }, 14000, 100);
   report('8b relay restarted: reconnect, one hub, one gate open', !!ok8b, `${Date.now() - tUp}ms ${fmt(s8b || [])}`);
+
+  // Step 8c: member reload -> automatic rejoin (no click), gate closed until selected
+  await B.page.reload();
+  const tReload = Date.now();
+  let s8c = null;
+  const ok8c = await poll(async () => {
+    try {
+      s8c = await snap([B, C]);
+      const [b, c] = s8c;
+      return b.joined && b.role === 'member' && b.tab.muted === true &&
+        c.laptops.length === 2 && gateSum(s8c) === 1;
+    } catch { return false; }
+  }, 15000, 200);
+  report('8c member reload: auto-rejoins as member, muted, one gate open', !!ok8c, `${Date.now() - tReload}ms ${fmt(s8c || [])}`);
 
   // Step 9: B leaves
   await ui(B, 'leave');

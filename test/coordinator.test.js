@@ -676,3 +676,20 @@ test('remote enrolls while hub is solo', () => {
   s.run(1000);
   assert.ok(s.c.remoteIds.has('cR'));
 });
+
+test('lost owner that comes back ready (reload / wifi blip) auto-resumes', () => {
+  const s = new Sim({ members: ['m1'] });
+  s.speak('m1', 0, 1e9, -20);
+  s.run(1500);
+  assert.strictEqual(s.last().owner, 'm1');
+  s.c.onLost('m1');
+  s.members = []; s.sendRoster();
+  s.run(200);
+  assert.strictEqual(s.last().state, 'PAUSED');
+  // m1 rejoins: first not ready, then ready (gate closed)
+  s.members = ['m1']; s.ready = new Set(); s.sendRoster(); s.run(200);
+  assert.strictEqual(s.last().state, 'PAUSED');
+  s.ready = new Set(['m1']); s.sendRoster(); s.run(1000);
+  assert.ok(['ROOM', 'SWITCHING'].includes(s.last().state), s.last().state);
+  assert.ok(s.events.some((e) => e.type === 'recovered' && e.id === 'm1'));
+});

@@ -216,7 +216,7 @@ function computeBadge(st) {
   const s = st.status;
   if (!s || !s.inCall || !s.joined) return ['', '#71717a'];
   const acts = Array.isArray(s.actions) ? s.actions.map((a) => (typeof a === 'string' ? a : a && a.action)) : [];
-  if (s.pause || acts.some((a) => a && a !== 'soundCheck')) return ['!', '#dc2626'];
+  if (s.pause || acts.some((a) => a && a !== 'soundCheck' && a !== 'makeHub')) return ['!', '#dc2626'];
   if (s.role === 'hub') return ['HUB', '#16a34a'];
   const mine = s.ownerLabel === 'You' || (Array.isArray(s.laptops) && s.laptops.some((l) => l && l.label === 'You' && l.owner));
   if (s.role === 'member' && mine) return ['MIC', '#2563eb'];
@@ -277,9 +277,9 @@ async function onTabMessage(st, msg) {
     case 'wsproxy': onWsProxy(st, msg); break;
     case 'mute': doMute(st, !!msg.muted, msg.reqId); break;
     case 'status':
-      st.status = msg;
+      st.status = msg.status && typeof msg.status === 'object' ? msg.status : msg; // page sends {type:'status', status:{...}}
       updateBadge(st);
-      pushStatus(st.tabId, msg);
+      pushStatus(st.tabId, st.status);
       break;
     case 'joined':
       if (msg.joined && typeof msg.meeting === 'string' && msg.meeting) {

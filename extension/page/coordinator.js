@@ -78,15 +78,26 @@
       if (!Array.isArray(list)) return;
       this._lastList = list;
       const seen = new Set();
+      let resume = false;
       for (const e of list) {
         if (!e || !hasId(e.id)) continue;
         seen.add(e.id);
-        if (e.id === this.selfId || this.lost.has(e.id)) continue;
+        if (e.id === this.selfId) continue;
+        if (this.lost.has(e.id)) {
+          // A lost laptop came back. `ready` means its gate is confirmed closed (fresh page or
+          // watchdog-closed), so the uncertainty that caused the pause is resolved.
+          if (!e.ready) continue;
+          this.lost.delete(e.id);
+          this.ev.push({ type: 'recovered', id: e.id });
+          if (this.state === 'PAUSED' && this.pause && this.pause.reason === 'ownerLost' &&
+              this.lost.size === 0 && this.relayUp) resume = true;
+        }
         const r = this.roster.get(e.id);
         if (r) { r.ready = !!e.ready; r.n = num(e.n, r.n); }
         else { this.roster.set(e.id, { ready: !!e.ready, n: num(e.n, 0) }); this.gate.set(e.id, 0); this.closedAt.set(e.id, this._now); }
       }
       for (const id of Array.from(this.roster.keys())) if (!seen.has(id)) this.onLost(id);
+      if (resume) this._toSettling(null);
     }
 
     onLevel(id, m) {
