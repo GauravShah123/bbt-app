@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Fake Meet</title></head>
+<body>
+<h1>Fake Meet</h1>
+<script>
+(async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const pc1 = new RTCPeerConnection();
+    const pc2 = new RTCPeerConnection();
+    pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate).catch(() => {});
+    pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate).catch(() => {});
+    stream.getAudioTracks().forEach((t) => pc1.addTrack(t, stream));
+    const offer = await pc1.createOffer();
+    await pc1.setLocalDescription(offer);
+    await pc2.setRemoteDescription(offer);
+    const answer = await pc2.createAnswer();
+    await pc2.setLocalDescription(answer);
+    await pc1.setRemoteDescription(answer);
+    window.__fake = { pc1, pc2, stream };
+  } catch (e) { console.log('FAKE_MEET_ERROR ' + e); window.__fakeError = String(e); }
+})();
+</script>
+</body></html>
