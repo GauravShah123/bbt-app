@@ -102,8 +102,8 @@ Tab muting (`chrome.tabs.update`), the badge and the WebSocket to the backend ne
 ## Development
 
 ```bash
-node --test test/coordinator.test.js test/room-core.test.mjs   # unit tests (no deps)
-node test/e2e/run.mjs                                      # 3 simulated laptops in headless Chromium
+npm test                 # unit tests (no deps)
+npm run test:e2e         # 3 simulated laptops in headless Chromium (normal + strict CSP + extra paths)
 node backend/dev-server.js                                 # local relay on ws://localhost:8787
 ```
 
@@ -126,6 +126,6 @@ node backend/dev-server.js                                 # local relay on ws:/
 - **One mic at a time.** Two people talking at once in the room: one of them is favoured.
 - **Remote interruption depends on Meet exposing per-participant IDs (CSRCs)** while a room mic is open. This is verified in the first in-room test (checklist M1).
 - **One click per laptop per meeting** (Join), which confirms the laptop is physically in the room.
-- **Closing the Hub's tab** (instead of leaving the Meet) gives a 30 s grace period before others can take over.
+- **Closing the Hub's tab** (instead of leaving the Meet) gives a 30 s grace period before the next laptop becomes Hub automatically.
 - **Chrome only**, unpacked. Meet changes can break `meet-hooks.js`; the safe failure is paused, gates closed.
 - **Daily usage cap:** 240 team minutes by default (`MAX_MINUTES_PER_DAY`).

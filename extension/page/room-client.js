@@ -11,7 +11,7 @@
     if (NS.RoomClient) return;
 
     var BACKOFF = [500, 1000, 2000, 4000, 8000];
-    var PING_MS = 2000;
+    var PING_MS = 2000, DEAD_MS = 6000;
     var LVL_ACTIVE_MS = 100, LVL_IDLE_MS = 1000;
 
     function nowMs() { try { return performance.now(); } catch (e) { return Date.now(); } }
@@ -109,7 +109,7 @@
         this.rtt = 0; this.via = null;
         this.key = null;
         this._reconnectT = null; this._pingT = null;
-        this._lastPing = 0; this._lastLvlAt = 0; this._lastAct = -1; this._seq = 0;
+        this._lastPing = 0; this._lastRx = 0; this._lastLvlAt = 0; this._lastAct = -1; this._seq = 0;
         this._gen = 0;
         this._onPage = this._onPage.bind(this);
         this._listening = false;
@@ -200,7 +200,7 @@
         this.hubLost = this.hubLost; // unchanged; next welcome refreshes
         if (wasUp) this._emit('down', { code: code || 0, reason: reason || '' });
         this._emit('closed', { code: code || 0, reason: reason || '', wasUp: wasUp });
-        if (code === 4003 || code === 4000) { // auth / replaced: retrying cannot help
+        if (code === 4000 || (code >= 4001 && code <= 4004)) { // replaced / full / bad params / auth / daily cap: retrying cannot help
           this.wanted = false;
           this._emit('fatal', { code: code, reason: reason || '' });
           return;
@@ -219,7 +219,7 @@
             case 'open':
               if (this.state !== 'connecting') return;
               this.state = 'open'; this.up = true; this._lastAct = -1;
-              this._lastPing = 0;
+              this._lastPing = 0; this._lastRx = nowMs();
               this._emit('up');
               break;
             case 'message': this._onData(msg.data); break;
@@ -230,6 +230,7 @@
       }
 
       _onData(data) {
+        this._lastRx = nowMs();
         if (typeof data !== 'string' || data.length > 8192) return;
         var m;
         try { m = JSON.parse(data); } catch (e) { return; }
@@ -280,6 +281,11 @@
       // Periodic work (ping). Called from a timer and from the audio tick.
       pump(now) {
         if (!this.up) return;
+        if (this._lastRx && now - this._lastRx > DEAD_MS) { // no pong or anything from the server: socket is dead
+          toBridge({ type: 'ws', op: 'close' });
+          this._closed(1006, 'timeout');
+          return;
+        }
         if (now - this._lastPing >= PING_MS) {
           this._lastPing = now;
           this.send({ t: 'ping', ts: now });

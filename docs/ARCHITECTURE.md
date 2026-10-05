@@ -299,3 +299,24 @@ Only members send levels (10/s while active, 1/s idle, plus immediate act change
 - No playback buffer or replacing Meet audio.
 - No multi-remote enrollment UI (the remote set supports several remote sources, but the sound check targets one).
 - No spatial breakout routing.
+
+## 12. Recovery behaviour (hardening after review)
+
+Pauses resolve themselves wherever that is safe. Manual buttons stay available while paused.
+
+| Situation | Automatic behaviour |
+|---|---|
+| Hub mutes itself in Meet | Never pauses; the Hub stays owner (Meet's mute already silences it) or hands off to a talking member |
+| Hub audio unhealthy (tick stall) | PAUSED{unhealthy}; auto-resume after 1 s healthy |
+| Close not acknowledged in REMOTE_PENDING | PAUSED{ackTimeout}; keeps re-sending close; auto-resume once closed |
+| Owner laptop lost (Wi-Fi, lid) | PAUSED{ownerLost}; auto-drop after `lostDropMs` (2.5 s, beyond the member watchdog of 1.5 s), then resume. Reappearing ready earlier → `recovered` |
+| Member watchdog closed its gate | The Hub re-sends `open` to the owner every `ownerRefreshMs` (1 s), so it reopens |
+| Hub tab mute not confirmed | SETTLING (and the exits from HUB_ONLY and SOUNDCHECK) waits for a confirmed mute (`tick(now, remote, {tabMuted})`); the mute is re-asserted every 2 s on Hub and members |
+| Hub socket replaced (same cid) | Relay bumps the epoch, so members close their gates |
+| Member socket replaced | Relay sends `lost` to the Hub first |
+| Hub lost unexpectedly | 30 s grace for the same tab to reclaim, then the relay **auto-promotes** the earliest ready member. `takeOver` is offered only if there's still no Hub |
+| Relay restart race | A Hub auto-granted to the first reconnecting client is handed back to a claiming Hub within 5 s; reconnects claim the current role |
+| Relay refuses (4001 full, 4002 bad params, 4003 wrong token, 4004 daily cap) or no welcome in 10 s | The laptop leaves room mode (plain Meet, unmuted) and the popup shows the reason |
+| Dead socket (no server message for 6 s) | Reconnect |
+| Transient Meet connection drop | inCall stays true until a PC is closed or failed; leaving room mode needs 3 s of not-in-call |
+| setGate never confirmed by the meter | Resolves after 300 ms (the gain ramp is scheduled on the audio thread) |

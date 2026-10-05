@@ -66,7 +66,13 @@
     $('none').hidden = !!s;
     $('join').hidden = !(s && !joined);
     $('joined').hidden = !joined;
-    if (s && !joined) $('joinWarn').hidden = s.backendConfigured != null ? !!s.backendConfigured : !!settings.backendUrl;
+    if (s && !joined) {
+      const w = $('joinWarn');
+      if (!w.dataset.t) w.dataset.t = w.textContent;
+      const noBackend = !(s.backendConfigured != null ? !!s.backendConfigured : !!settings.backendUrl);
+      w.textContent = s.error || w.dataset.t;
+      w.hidden = !(s.error || noBackend);
+    }
     if (joined) renderJoined(s);
     renderReadouts();
   }

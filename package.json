@@ -1,0 +1,9 @@
+{
+  "name": "hybrid-audio",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/coordinator.test.js test/room-core.test.mjs",
+    "test:e2e": "node test/e2e/run.mjs && E2E_CSP=strict node test/e2e/run.mjs && node test/e2e/extra.mjs",
+    "package": "node tools/package-extension.mjs"
+  }
+}

@@ -50,8 +50,10 @@
 - [ ] Reload the Meet tab on a member while in the call. It rejoins automatically, with no click.
 
 ## 7. Failures
-- [ ] Turn Wi-Fi off on the laptop that owns the mic. The Hub shows **Laptop N lost** with **Continue without Laptop N**. Click it: the room continues.
-- [ ] Close the Hub laptop's lid (unexpected loss). Members show **Take over as Hub**. Click it on one: the room continues.
+- [ ] Turn Wi-Fi off on the laptop that owns the mic. The Hub briefly shows **Laptop N lost**, then continues by itself within ~3 s (no click). Turn Wi-Fi back on: the laptop rejoins.
+- [ ] Close the Hub laptop's lid (unexpected loss). After ~30 s another laptop becomes Hub by itself and plays R. Note the time.
+- [ ] Reopen the old Hub's lid: it rejoins as a member, and there is still only one speaker.
+- [ ] Wrong token on one laptop (Debug → token → Save, then Join): it shows **Wrong team token** and stays plain Meet.
 - [ ] Block the backend for everyone (for example, a wrong URL, then Save). All laptops pause with gates closed. On the Hub, **Use Hub only** gives normal Meet audio on the Hub.
 - [ ] Fix the URL: everyone recovers without reloading.
 

@@ -135,6 +135,10 @@
     dead = true;
     clearTimeout(timer);
     try { window.removeEventListener('ha:to-ext', onPage); } catch (e) {}
+    // Tell the page its socket is gone before we drop our handlers.
+    if (ws) wsEv('close', { code: 1006 }, 'direct');
+    else if (proxyOpen) wsEv('close', { code: 1006 }, 'sw');
+    proxyOpen = false;
     dropDirect();
     port = null;
   }

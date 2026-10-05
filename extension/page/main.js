@@ -11,7 +11,7 @@
 
     var LOG_MAX = 3000;
     var STATUS_MS = 250, HB_MS = 500, MUTE_REASSERT_MS = 2000, MUTE_TIMEOUT_MS = 2000;
-    var LEAVE_DEBOUNCE_MS = 1500, YIELD_TIMEOUT_MS = 3000, STEP_FALLBACK_MS = 200;
+    var LEAVE_DEBOUNCE_MS = 3000, YIELD_TIMEOUT_MS = 3000, STEP_FALLBACK_MS = 200, WELCOME_TIMEOUT_MS = 10000;
     var ENGINE_PARAMS = ['vadOnsetDb', 'minSpeechDb', 'actHoldMs'];
 
     // ---------- state ----------
@@ -42,6 +42,8 @@
     var log = [];
     var sums = { switchMs: [], remoteMs: [], rtt: [], stateCounts: {}, pauses: {} };
     var autoJoinTried = false;
+    var joinError = null, welcomeT = null;
+    var FATAL_TEXT = { 4001: 'Room full', 4002: 'Bad request', 4003: 'Wrong team token', 4004: 'Daily limit reached' };
 
     // ---------- helpers ----------
     function now() { try { return performance.now(); } catch (e) { return Date.now(); } }
@@ -101,11 +103,16 @@
       lastMuteReq = muted; lastMuteReqAt = now();
       return new Promise(function (resolve) {
         var t = setTimeout(function () {
-          if (mutePending[reqId]) { delete mutePending[reqId]; evt('muteTimeout', { muted: muted }); resolve(null); }
+          if (mutePending[reqId]) { delete mutePending[reqId]; tabMuted = null; evt('muteTimeout', { muted: muted }); resolve(null); }
         }, MUTE_TIMEOUT_MS);
         mutePending[reqId] = { resolve: resolve, timer: t, muted: muted };
         toExt({ type: 'mute', muted: muted, reqId: reqId });
       });
+    }
+    // Confirmed Hub tab mute: the last 'muted' reply, or null if unknown or a request is in flight.
+    function confirmedMute() {
+      for (var k in mutePending) return null;
+      return typeof tabMuted === 'boolean' ? tabMuted : null;
     }
     function onMuted(msg) {
       var p = msg.reqId && mutePending[msg.reqId];
@@ -139,7 +146,7 @@
       if (!e || !CR) { evt('joinAbort', { why: 'modules' }); return; }
       if (!meet.meeting) { evt('joinAbort', { why: 'noMeeting' }); return; }
       if (!cfg.backendUrl || !cfg.token || !cfg.cid) { evt('joinAbort', { why: 'noBackend' }); return; }
-      joining = true; userLeft = false;
+      joining = true; userLeft = false; joinError = null;
       var tok = ++joinTok;
       try {
         evt('join', { meeting: meet.meeting, claim: wasHub ? 1 : 0 });
@@ -157,6 +164,14 @@
         await client.connect({ url: cfg.backendUrl, meeting: meet.meeting, token: cfg.token, cid: cfg.cid, claim: wasHub ? 1 : 0 });
         if (tok !== joinTok) return;
         sendJoined();
+        if (welcomeT) clearTimeout(welcomeT);
+        welcomeT = setTimeout(function () {
+          welcomeT = null;
+          if (tok !== joinTok || !joined || (client && client.welcomed)) return;
+          joinError = 'Relay unreachable';
+          evt('noWelcome');
+          leave('noWelcome', { unmute: true });
+        }, WELCOME_TIMEOUT_MS);
       } catch (err) {
         warn('join', err);
         if (tok === joinTok) { try { await leave('joinError', { unmute: true }); } catch (_) {} }
@@ -175,6 +190,7 @@
       if ((!joined && !joining) || leaving) return;
       leaving = true;
       var myTok = ++joinTok; txnTok++;
+      if (welcomeT) { clearTimeout(welcomeT); welcomeT = null; }
       evt('leave', { reason: reason || 'ui' });
       var e = eng();
       try {
@@ -207,9 +223,14 @@
         evt('relayDown', d);
         if (c) { try { c.onRelay(false); } catch (e) { warn('onRelay', e); } }
       });
-      cl.on('fatal', function (d) { evt('fatal', d); });
+      cl.on('fatal', function (d) {
+        evt('fatal', d);
+        if (cl !== client) return;
+        if (FATAL_TEXT[d.code]) { joinError = FATAL_TEXT[d.code]; leave('fatal' + d.code, { unmute: true }); }
+        else { try { var e = eng(); if (e) e.setGate(false); } catch (_) {} } // 4000: replaced by our own duplicate; stop quietly
+      });
       cl.on('session', function (d) { evt('session', d); });
-      cl.on('welcome', function () { lastReady = null; onRoomState('welcome'); });
+      cl.on('welcome', function () { if (welcomeT) { clearTimeout(welcomeT); welcomeT = null; } lastReady = null; onRoomState('welcome'); });
       cl.on('roster', function () { onRoomState('roster'); });
       cl.on('pong', function (p) {
         if (p.rtt !== undefined) {
@@ -290,7 +311,8 @@
     async function beginRole(want, key, why) {
       var tok = ++txnTok;
       var prevRole = role;
-      curKey = key; transitioning = true; c = null; m = null; hubOwned = false; lastGateReq = -1; lastHb = null;
+      curKey = key; transitioning = true; yielding = false; if (yieldT) { clearTimeout(yieldT); yieldT = null; }
+      c = null; m = null; hubOwned = false; lastGateReq = -1; lastHb = null;
       lastOut = null; lastMemberOut = null; lastPauseSig = ''; seenCmd = {};
       evt('role', { from: prevRole, to: want, epoch: client.epoch, sid: client.sid, why: why });
       maybeSendReady(true); // r:0 while transitioning
@@ -300,11 +322,8 @@
       try {
         var C = coord();
         if (want === 'hub') {
-          c = new C.Coordinator({ selfId: client.you, params: params });
+          newCoordinator(C);
           role = 'hub';
-          lastFreeze = null; lastMuteReq = null;
-          c.onRoster(rosterForCoord());
-          c.onRelay(!!client.up);
         } else {
           m = new C.MemberAgent({ params: params });
           m.onEpoch(client.epoch);
@@ -320,6 +339,13 @@
       sendStatus(true);
     }
 
+    function newCoordinator(C) {
+      c = new C.Coordinator({ selfId: client.you, params: params });
+      lastFreeze = null; lastMuteReq = null; lastOut = null; lastPauseSig = ''; seenCmd = {};
+      c.onRoster(rosterForCoord());
+      c.onRelay(!!client.up);
+    }
+
     function yieldTo(to) {
       if (role !== 'hub' || yielding || !client) return;
       yielding = true;
@@ -328,7 +354,16 @@
         try { var e = eng(); if (e) await e.setGate(false); } catch (err) { warn('yield.gate', err); }
         if (client && role === 'hub') client.send({ t: 'yield', to: to });
       })();
-      yieldT = setTimeout(function () { yielding = false; yieldT = null; }, YIELD_TIMEOUT_MS);
+      yieldT = setTimeout(function () {
+        yieldT = null;
+        if (!yielding) return;
+        yielding = false;
+        // Yield failed or timed out: our gate is closed but the coordinator thinks self is open. Rebuild it.
+        if (role === 'hub' && joined && client && !transitioning) {
+          evt('yieldTimeout', { to: to });
+          try { newCoordinator(coord()); } catch (err) { warn('yield.recreate', err); }
+        }
+      }, YIELD_TIMEOUT_MS);
     }
 
     // ---------- member gate ----------
@@ -372,7 +407,7 @@
       cc.onLevel(client.you, {
         levelDb: meas.levelDb, noiseDb: meas.noiseDb, act: !!meas.act, healthy: !!meas.healthy, userMuted: !!meas.userMuted, at: t
       });
-      var out = cc.tick(t, safeRemote());
+      var out = cc.tick(t, safeRemote(), { tabMuted: confirmedMute() });
       if (cc !== c || !out) return;
       lastOut = out;
       var evs = out.events || [];
@@ -393,8 +428,12 @@
         else client.send({ t: 'cmd', to: cm.to, op: cm.op, e: client.epoch, g: cm.gen });
       }
       // tab mute: on change, and re-asserted every 2 s
-      if (typeof out.tabMuted === 'boolean' && (out.tabMuted !== lastMuteReq || t - lastMuteReqAt >= MUTE_REASSERT_MS)) {
-        requestMute(out.tabMuted);
+      if (typeof out.tabMuted === 'boolean') {
+        var cm2 = confirmedMute(), age = t - lastMuteReqAt;
+        // also retry quickly while the confirmed state disagrees and nothing is in flight
+        if (out.tabMuted !== lastMuteReq || age >= MUTE_REASSERT_MS || (cm2 !== null && cm2 !== out.tabMuted && age >= 500)) {
+          requestMute(out.tabMuted);
+        }
       }
       if (out.freezeNoise !== lastFreeze) {
         lastFreeze = out.freezeNoise;
@@ -442,7 +481,7 @@
         applyMemberGate(0, null); // e.g. watchdog: make sure the gate really closed
       }
       if (r.watchdog && !lastMemberOut._logged) { evt('watchdog'); }
-      if (tabMuted !== true && t - lastMuteReqAt >= MUTE_REASSERT_MS) requestMute(true);
+      if (t - lastMuteReqAt >= MUTE_REASSERT_MS) requestMute(true);
       client.sendLevel(meas, t);
     }
 
@@ -488,7 +527,7 @@
         if (!client.up) pause = { reason: 'relay' };
         else if (lastMemberOut && lastMemberOut.watchdog) pause = { reason: 'hub' };
         actions = ['makeHub'];
-        if (client.up && !client.hub) actions.push('takeOver');
+        if (client.up && !client.hub && !client.hubLost) actions.push('takeOver');
       }
       var floor = null;
       if (joined && role) floor = (state === 'REMOTE' || state === 'REMOTE_PENDING') ? 'remote' : 'room';
@@ -503,7 +542,7 @@
           levelDb: meas.levelDb, noiseDb: meas.noiseDb, act: !!meas.act, gate: e ? e.gateApplied : null, meter: meas.meter || 'none',
           ctxState: meas.ctxState || null, healthy: !!meas.healthy, userMuted: !!meas.userMuted
         },
-        rtt: client ? client.rtt : 0, backendConfigured: !!(cfg.backendUrl && cfg.token)
+        error: joinError, rtt: client ? client.rtt : 0, backendConfigured: !!(cfg.backendUrl && cfg.token)
       };
     }
 
@@ -586,7 +625,15 @@
           case 'ui': onUi(msg.action, msg.arg); break;
           case 'muted': onMuted(msg); break;
           case 'getLog': toExt({ type: 'logDump', reqId: msg.reqId, log: buildDump() }); break;
-          case 'sync': if (joined) sendJoined(); sendStatus(true); break;
+          case 'sync':
+            // SW restarted: re-send joined (incl. false) and the desired tab mute; the SW applies the actual mute.
+            sendJoined();
+            if (joined && client && !leaving) {
+              var dm = role === 'hub' ? (lastOut && typeof lastOut.tabMuted === 'boolean' ? lastOut.tabMuted : true) : true;
+              requestMute(dm);
+            }
+            sendStatus(true);
+            break;
           case 'cfgOut':
             if (client && msg.params) { client.send({ t: 'cfg', params: msg.params }); setParams(msg.params, 'cfgOut'); }
             break;
@@ -631,7 +678,6 @@
     function init() {
       window.addEventListener('ha:to-page', onBridge);
       window.addEventListener('pagehide', function () { pageLeaving = true; });
-      window.addEventListener('beforeunload', function () { pageLeaving = true; });
       window.addEventListener('pageshow', function () { pageLeaving = false; });
       hookTick();
       try { var h = hooks(); if (h && h.getMeetState) { var s = h.getMeetState(); if (s) meet = { meeting: s.meeting || null, inCall: !!s.inCall }; } } catch (e) {}

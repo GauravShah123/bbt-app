@@ -48,9 +48,9 @@
     // ---------- RTCPeerConnection ----------
     function track(pc) {
       try {
-        var rec = { ref: hasWeakRef ? new WeakRef(pc) : { deref: function () { return pc; } } };
+        var rec = { ref: hasWeakRef ? new WeakRef(pc) : { deref: function () { return pc; } }, seen: false };
         pcs.push(rec);
-        pc.addEventListener('connectionstatechange', function () { try { checkMeet(); recvStamp = 0; } catch (e) {} });
+        pc.addEventListener('connectionstatechange', function () { try { if (pc.connectionState === 'connected') rec.seen = true; checkMeet(); recvStamp = 0; } catch (e) {} });
       } catch (e) {}
     }
 
@@ -184,7 +184,12 @@
         for (var i = 0; i < pcs.length; i++) {
           var pc = pcs[i].ref.deref();
           if (!pc) continue;
-          try { if (pc.connectionState === 'connected') { connected = true; break; } } catch (e) {}
+          try {
+            var cs = pc.connectionState;
+            if (cs === 'connected') pcs[i].seen = true;
+            // Once connected, a transient 'disconnected'/'connecting' still counts as in the call.
+            if (pcs[i].seen && cs !== 'closed' && cs !== 'failed') { connected = true; break; }
+          } catch (e) {}
         }
       }
       return { meeting: meeting, inCall: !!(meeting && connected) };

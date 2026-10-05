@@ -388,22 +388,20 @@ async function phase2() {
   let pauseSt = null;
   const lost = await poll(async () => {
     pauseSt = await Promise.all([A, other].map((lp) => lastStatus(lp)));
-    return pauseSt.every((s) => s && s.pause && s.pause.reason === 'hub' && s.actions.includes('takeOver') && !s.relayUp === false);
+    return pauseSt.every((s) => s && s.pause && s.pause.reason === 'hub' && !s.actions.includes('takeOver') && !s.relayUp === false);
   }, 6000, 100);
-  report('3a hub tab closed: members show pause hub-lost + takeOver', !!lost, `${Date.now() - tClose}ms ` + JSON.stringify(pauseSt && pauseSt.map((s) => s && [s.pause, s.actions])));
-  // before grace expiry a take is rejected by the relay
-  const mem1 = A, mem2 = other;
-  await ui(mem1, 'takeOver'); await sleep(1500);
-  const early = await safeDbg(mem1);
-  const waitGrace = Math.max(0, GRACE_MS + 1200 - (Date.now() - tClose));
-  await sleep(waitGrace);
-  await ui(mem1, 'takeOver');
+  report('3a hub tab closed: members show pause hub-lost, no takeOver offered during grace', !!lost, `${Date.now() - tClose}ms ` + JSON.stringify(pauseSt && pauseSt.map((s) => s && [s.pause, s.actions])));
+  // after the grace the relay auto-promotes a member (takeOver stays only as a fallback)
+  await sleep(Math.max(0, GRACE_MS + 1200 - (Date.now() - tClose)));
   let s3 = null;
   const took = await poll(async () => {
-    s3 = await snap([mem1, mem2]);
-    return s3[0].role === 'hub' && s3[1].role === 'member' && s3[0].state === 'ROOM' && gateSum(s3) === 1;
-  }, 5000);
-  report('3b take during grace ignored; after grace ui takeOver: member becomes hub, ROOM, one gate open', !!took && early && early.role === 'member', `earlyRole=${early && early.role} (take during grace should be ignored) ${fmt(s3 || [])}`);
+    s3 = await snap([A, other]);
+    return s3.filter((x) => x.role === 'hub').length === 1 && s3.every((x) => x.joined) && s3.find((x) => x.role === 'hub').state === 'ROOM' && gateSum(s3) === 1;
+  }, 6000);
+  const hubIdx = s3 && s3.findIndex((x) => x.role === 'hub');
+  const mem1 = hubIdx === 1 ? other : A, mem2 = hubIdx === 1 ? A : other;
+  if (hubIdx === 1) s3 = [s3[1], s3[0]];
+  report('3b after grace: a member is auto-promoted to hub, ROOM, one gate open', !!took, fmt(s3 || []));
   await setLevel(mem2, LOUD);
   const idM2 = s3 && s3[1].you;
   const works = await poll(async () => { const s = await snap([mem1, mem2]); return s[0].owner === idM2 && s[1].gate === 1 && s[0].gate === 0; }, 3000);
@@ -426,10 +424,47 @@ async function phase2() {
   report('3d hub page reload: reclaims hub within grace without takeOver', !!reclaimed, `${Date.now() - tRel}ms ${fmt(s3r || [])}`);
 }
 
+async function phase3() {
+  const port = await freePort();
+  await startRelay(port);
+  try {
+    const [A] = await setup(1, port);
+    // C: wrong team token -> fatal 4003 -> passthrough, unmuted, status.error
+    await popupSend(A, { type: 'setBackend', url: `ws://127.0.0.1:${port}`, token: 'wrongtoken' });
+    await sleep(400);
+    await ui(A, 'join');
+    let st = null;
+    const fatal = await poll(async () => { st = await lastStatus(A); const d = await safeDbg(A); return st && st.error === 'Wrong team token' && d && !d.joined; }, 6000, 100);
+    const d3 = await safeDbg(A), t3 = await safeTab(A);
+    report('C wrong token: left to passthrough, gate open, tab unmuted, status.error "Wrong team token"', !!fatal && d3.gate === 1 && t3 && t3.muted === false, JSON.stringify({ err: st && st.error, gate: d3 && d3.gate, muted: t3 && t3.muted }));
+    // D: transient PC 'disconnected' longer than the debounce must not leave
+    await popupSend(A, { type: 'setBackend', url: `ws://127.0.0.1:${port}`, token: TOKEN });
+    await sleep(400);
+    await ui(A, 'join');
+    const ok = await waitDbg(A, (x) => x.joined && x.role === 'hub', 6000);
+    await A.page.evaluate(() => {
+      for (const pc of [window.__fake.pc1, window.__fake.pc2]) {
+        Object.defineProperty(pc, 'connectionState', { configurable: true, get: () => 'disconnected' });
+        pc.dispatchEvent(new Event('connectionstatechange'));
+      }
+    });
+    await sleep(4500);
+    const mid = await safeDbg(A);
+    const inCallMid = await A.page.evaluate(() => window.__hybridAudio.hooks.getMeetState().inCall);
+    await A.page.evaluate(() => {
+      for (const pc of [window.__fake.pc1, window.__fake.pc2]) { delete pc.connectionState; pc.dispatchEvent(new Event('connectionstatechange')); }
+    });
+    await sleep(500);
+    const end = await safeDbg(A);
+    report('D transient PC disconnected (>3s) does not leave the room', !!ok && mid && mid.joined && inCallMid && end && end.joined, JSON.stringify({ mid: mid && mid.joined, inCallMid, end: end && end.joined }));
+  } finally { await teardown(); await stopRelay(); }
+}
+
 let code = 0;
 try {
   await phase1();
   await phase2();
+  await phase3();
   await sleep(300);
   const bad = errors.filter((e) => !/WebSocket connection to|ERR_CONNECTION_REFUSED|ERR_CONNECTION_CLOSED|Failed to load resource|503/.test(e));
   if (errors.length) console.log('collected console/page errors:\n  ' + errors.join('\n  '));
