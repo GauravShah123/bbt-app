@@ -74,9 +74,9 @@ test('second client without claim is a member; claim=1 does not steal an establi
 
 test('claim=1 becomes hub when hub is null after grace', () => {
   const { join, core, clock, clients } = setup();
-  join(A); join(B);
+  join(A);
   core.close(clients[A]);
-  clock.fire(30001);
+  clock.fire(30001); // nobody left to promote: hub stays null
   const c = join(C, 1);
   assert.equal(c.last('welcome').hub, C);
   assert.equal(core.epoch, 2);
@@ -106,20 +106,16 @@ test('hub grace: same cid reclaims, others blocked, take blocked during grace', 
   assert.equal(core.hub, A);
 });
 
-test('after grace: roster broadcast with hubLost null, then take succeeds (epoch+1)', () => {
+test('after grace: members get a roster with the auto-granted hub (epoch+1); take is ignored', () => {
   const { join, core, send, clock, clients } = setup();
   join(A); const b = join(B); const c = join(C);
   core.close(clients[A]);
   clock.fire(30001);
   assert.equal(b.last('roster').hubLost, null);
-  assert.equal(b.last('roster').hub, null);
-  send(c, { t: 'take' });
-  assert.equal(core.hub, C);
-  assert.equal(core.epoch, 2);
-  assert.equal(b.last('roster').hub, C);
+  assert.equal(b.last('roster').hub, B);
   assert.equal(b.last('roster').epoch, 2);
-  send(b, { t: 'take' }); // hub exists: ignored
-  assert.equal(core.hub, C);
+  send(c, { t: 'take' }); // hub exists: ignored
+  assert.equal(core.hub, B);
   assert.equal(core.epoch, 2);
 });
 
@@ -372,22 +368,102 @@ test('hub unexpected close: hub null, hubLost in roster, no lost/left notices', 
   }
 });
 
-test('duplicate cid: older socket closed 4000, no leave/lost, keeps n and hub', () => {
+test('duplicate cid: older socket closed 4000, Hub told lost (no left), keeps n and hub', () => {
   const { join, core, send, a, b } = room3();
   const b2 = join(B);
   assert.deepEqual(b.closed, { code: 4000, reason: 'replaced' });
-  assert.equal(a.count('lost') + a.count('left'), 0);
+  assert.equal(a.count('left'), 0);
+  assert.deepEqual(a.all('lost'), [{ t: 'lost', cid: B }]);
+  assert.ok(a.sent.findIndex((m) => m.t === 'lost') >= 0);
   assert.equal(core.clients.size, 3);
   assert.equal(b2.last('welcome').roster.find((x) => x.cid === B).n, 2);
   core.close(b); // late close event of the replaced socket: ignored
-  assert.equal(a.count('lost'), 0);
+  assert.equal(a.count('lost'), 1);
   assert.equal(core.clients.size, 3);
   send(b2, { t: 'want' });
   assert.equal(a.count('want'), 1);
-  // hub reconnecting over its own old socket stays hub without epoch change
+  // hub reconnecting over its own old socket stays hub but the epoch bumps (see next test)
   const a2 = join(A);
   assert.equal(a2.last('welcome').hub, A);
-  assert.equal(core.epoch, 1);
+  assert.equal(core.epoch, 2);
+});
+
+test('duplicate cid of the Hub: epoch+1, roster broadcast, no lost/left sent', () => {
+  const { join, core, a, b, c } = room3();
+  const a2 = join(A);
+  assert.deepEqual(a.closed, { code: 4000, reason: 'replaced' });
+  assert.equal(core.hub, A);
+  assert.equal(core.epoch, 2);
+  assert.equal(a2.last('welcome').epoch, 2);
+  for (const s of [b, c]) {
+    assert.equal(s.last('roster').epoch, 2);
+    assert.equal(s.last('roster').hub, A);
+    assert.equal(s.count('lost'), 0);
+  }
+});
+
+test('duplicate cid of a member: lost reaches the Hub before the roster broadcast', () => {
+  const { join, a } = room3();
+  join(B);
+  const order = a.sent.map((m) => m.t).filter((t) => t === 'lost' || t === 'roster');
+  assert.deepEqual(order, ['lost', 'roster']);
+});
+
+test('peer cap: reconnect of an existing cid at MAX_CLIENTS is never refused 4001', () => {
+  const { join, core } = setup();
+  for (let i = 0; i < 8; i++) join(cidOf('X' + i));
+  const hub = cidOf('X0');
+  for (const cid of [cidOf('X0'), cidOf('X7'), cidOf('X7')]) {
+    const s = join(cid);
+    assert.equal(s.ok, true);
+    assert.equal(s.closed, null);
+  }
+  assert.equal(core.clients.size, 8);
+  assert.equal(core.hub, hub);
+  assert.equal(join(cidOf('Z')).closed.code, 4001);
+});
+
+test('grace expiry auto-grants earliest READY member (else earliest), epoch+1, broadcast', () => {
+  const { join, core, send, clock, clients } = setup();
+  join(A); const b = join(B); const c = join(C);
+  send(c, { t: 'ready', r: 1 });
+  core.close(clients[A]);
+  const e = core.epoch;
+  clock.fire(30001);
+  assert.equal(core.hub, C);
+  assert.equal(core.epoch, e + 1);
+  assert.equal(core.hubLost, null);
+  assert.equal(b.last('roster').hub, C);
+  assert.equal(b.last('roster').epoch, e + 1);
+  // nobody ready: earliest member
+  const r = setup();
+  r.join(A); const b2 = r.join(B); r.join(C);
+  r.core.close(r.clients[A]);
+  r.clock.fire(30001);
+  assert.equal(r.core.hub, B);
+  assert.equal(b2.last('roster').hub, B);
+});
+
+test('grace expiry with no clients just clears; later join gets a fresh hub', () => {
+  const { join, core, clock, clients } = setup();
+  join(A);
+  core.close(clients[A]);
+  clock.fire(30001);
+  assert.equal(core.hub, null);
+  assert.equal(core.hubLost, null);
+  assert.equal(core.idle, true);
+  join(B);
+  assert.equal(core.hub, B);
+});
+
+test('auto-grant hand-back does not apply after a grace-expiry promotion', () => {
+  const { join, core, clock, clients } = setup();
+  join(A); join(B);
+  core.close(clients[A]);
+  clock.fire(30001);
+  assert.equal(core.hub, B);
+  join(A, 1); // old hub claims right after: B was promoted by the relay, not auto-granted
+  assert.equal(core.hub, B);
 });
 
 test('auth: wrong/missing token closes 4003; right token ok; empty config accepts anything', () => {

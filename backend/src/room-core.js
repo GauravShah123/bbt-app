@@ -128,8 +128,11 @@ export class RoomCore {
 
     const t = this.now();
     let n;
+    const replacedHub = !!old && this.hub === cid;
     if (old) {
-      // Duplicate cid: replace silently (neither leave nor lost).
+      // Duplicate cid: the old socket is closed 4000 (not treated as leave). A member replace
+      // tells the Hub it was lost so it can pause or recover; a Hub replace bumps the epoch below.
+      if (!replacedHub && this.hub) this.sendTo(this.hub, { t: 'lost', cid });
       n = old.n;
       this.bySock.delete(old.sock);
       this.rate.delete(old.sock);
@@ -144,8 +147,12 @@ export class RoomCore {
     this.bySock.set(sock, cid);
 
     // Hub grant.
-    if (this.hub === cid) {
-      // Reconnect of the current hub (duplicate cid): keeps the role.
+    if (replacedHub) {
+      // Duplicate-cid replace of the current Hub: members may still hold a gate opened by the
+      // old coordinator. Re-grant (epoch+1) so they close on the epoch change.
+      this.grantHub(cid);
+    } else if (this.hub === cid) {
+      // unreachable guard: hub cid always has a client entry
     } else if (this.hub === null) {
       const claimed = claim === 1 || claim === '1';
       if (this.hubLost && this.hubLost.cid === cid) {
@@ -193,8 +200,10 @@ export class RoomCore {
     this.graceTimer = null;
     if (this.hubLost && this.hubLost.cid === cid) {
       this.hubLost = null;
-      this.broadcastRoster();
+      const next = this.pickSuccessor();
+      if (next) { this.grantHub(next); this.autoGrant = null; }
     }
+    this.broadcastRoster();
   }
   clearGrace() {
     if (this.graceTimer !== null) { this.clearTimer(this.graceTimer); this.graceTimer = null; }
@@ -203,6 +212,7 @@ export class RoomCore {
   grantHub(cid) {
     this.hub = cid;
     this.epoch += 1;
+    this.autoGrant = null;   // callers that auto-grant set it again right after
     if (this.hubLost) { this.hubLost = null; this.clearGrace(); }
   }
 

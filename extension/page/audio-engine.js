@@ -13,6 +13,7 @@
     var WORKLET_TIMEOUT_MS = 2000;
     var DB_FLOOR = -120;
     var WARMUP_MS = 1000;
+    var GATE_FALLBACK_MS = 300;
 
     // ---------- state ----------
     var ctx = null, hp = null, lp = null, zero = null;
@@ -179,7 +180,8 @@
       var rec = { entry: entry, gain: gain, dest: dest, processed: processed, live: true };
       var orig = entry.orig;
       var nativeStop = processed.stop.bind(processed);
-      var nativeClone = null;
+      // capture BEFORE the override below, or cloning a stopped track would recurse into itself
+      var nativeClone = typeof processed.clone === 'function' ? processed.clone.bind(processed) : null;
       try {
         Object.defineProperty(processed, 'label', { value: orig.label, configurable: true, enumerable: true });
         Object.defineProperty(processed, 'getSettings', { value: function getSettings() { return orig.getSettings(); }, configurable: true, writable: true });
@@ -200,7 +202,6 @@
           },
           configurable: true, writable: true,
         });
-        nativeClone = processed.clone;
       } catch (e) {}
       rec.nativeStop = nativeStop;
       entry.users.push(rec);
@@ -314,10 +315,12 @@
         } catch (e) {}
       }
       pending = { target: target, rampEnd: end, resolvers: resolvers };
-      // a suspended context renders nothing, so nothing can leak: don't hang the caller
+      // Wall-clock fallback, unconditional: the ramp is scheduled on the audio thread and applies
+      // at its time regardless of main-thread or meter stalls (and a suspended context renders
+      // nothing, so nothing can leak). Never let leave()/role changes hang on a stalled meter.
       setTimeout(function () {
-        try { if (pending && pending.rampEnd === end && (!ctx || ctx.state !== 'running')) resolveGate(); } catch (e) {}
-      }, 300);
+        try { if (pending && pending.rampEnd === end) resolveGate(); } catch (e) {}
+      }, GATE_FALLBACK_MS);
       return done;
     }
 
