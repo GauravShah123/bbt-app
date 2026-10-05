@@ -60,7 +60,7 @@ class Sim {
     const due = this.acks.filter((a) => a.at <= t);
     this.acks = this.acks.filter((a) => a.at > t);
     for (const a of due) { this.trace.push({ t, k: 'ack', id: a.id, op: a.op, gen: a.gen }); this.c.onApplied(a.id, a.gen, a.gate); }
-    const out = this.c.tick(t, this.sources());
+    const out = this.c.tick(t, this.sources(), this.extra);
     this.outs.push({ t, out });
     for (const e of out.events) this.events.push(e);
     for (const cmd of out.commands) {
@@ -692,4 +692,136 @@ test('lost owner that comes back ready (reload / wifi blip) auto-resumes', () =>
   s.ready = new Set(['m1']); s.sendRoster(); s.run(1000);
   assert.ok(['ROOM', 'SWITCHING'].includes(s.last().state), s.last().state);
   assert.ok(s.events.some((e) => e.type === 'recovered' && e.id === 'm1'));
+});
+
+// ---- recovery / mute confirmation / owner refresh ----
+test('self userMuted with no other candidate stays in ROOM owned by self', () => {
+  const s = new Sim({ members: ['m1'] });
+  s.noLevel = new Set(['m1']);
+  s.segs.push({ id: HUB, from: 0, to: 1e9, levelDb: -40, extra: { userMuted: true } });
+  s.run(3000);
+  assert.strictEqual(s.last().state, 'ROOM');
+  assert.strictEqual(s.last().owner, HUB);
+  assert.ok(!s.states().some((e) => e.to === 'PAUSED'));
+});
+
+test('self unhealthy pause auto-resumes after 1000 ms of continuous health', () => {
+  const s = new Sim({ members: ['m1'] });
+  s.noLevel = new Set(['m1']);
+  s.run(100);
+  s.segs.push({ id: HUB, from: 100, to: 1500, levelDb: -40, extra: { healthy: false } });
+  s.run(1000);
+  assert.strictEqual(s.last().state, 'PAUSED');
+  assert.strictEqual(s.last().pause.reason, 'unhealthy');
+  s.run(700);   // healthy since ~1500; not yet 1000 ms
+  assert.strictEqual(s.last().state, 'PAUSED');
+  s.run(1200);
+  assert.ok(['SETTLING', 'ROOM'].includes(s.last().state), s.last().state);
+  assert.ok(s.events.some((e) => e.type === 'autoResume' && e.reason === 'unhealthy'));
+  s.run(500);
+  assert.strictEqual(s.last().state, 'ROOM');
+  assert.strictEqual(s.last().owner, HUB);
+});
+
+test('ackTimeout pause keeps re-sending close and auto-resumes once it acks', () => {
+  const s = remoteSetup();
+  s.noAck.add('m1');
+  const T = s.now + 100;
+  s.remote('R', T, T + 60000, 0.05);
+  s.run(1500);
+  assert.strictEqual(s.last().state, 'PAUSED');
+  const n1 = s.cmdsOf('m1', 'close').length;
+  s.run(1500);
+  assert.ok(s.cmdsOf('m1', 'close').length > n1);
+  assert.strictEqual(s.last().state, 'PAUSED');
+  s.noAck.delete('m1');
+  s.run(1500);
+  assert.ok(s.events.some((e) => e.type === 'autoResume' && e.reason === 'ackTimeout'));
+  assert.notStrictEqual(s.last().state, 'PAUSED');
+});
+
+test('ownerLost pause auto-drops the lost id after lostDropMs and resumes', () => {
+  const s = new Sim();
+  makeOwner(s, 'm1');
+  s.c.onLost('m1');
+  s.members = ['m2']; s.sendRoster();
+  s.run(2000);
+  assert.strictEqual(s.last().state, 'PAUSED');
+  assert.ok(s.last().actions.includes('dropLost') && s.last().actions.includes('hubOnly'));
+  assert.strictEqual(DEFAULTS.lostDropMs, 2500);
+  s.run(800);
+  assert.ok(s.events.some((e) => e.type === 'autoDrop' && e.id === 'm1'));
+  assert.ok(s.events.some((e) => e.type === 'autoResume' && e.reason === 'ownerLost'));
+  s.run(500);
+  assert.strictEqual(s.last().state, 'ROOM');
+  assert.strictEqual(s.last().pause, null);
+});
+
+test('SETTLING waits for confirmed tab mute before reopening any mic', () => {
+  const s = remoteSetup();
+  s.extra = { tabMuted: null };
+  const T = s.now + 100;
+  s.remote('R', T, T + 500, 0.05);
+  s.run(1500);
+  assert.strictEqual(s.last().state, 'SETTLING');
+  assert.strictEqual(s.last().debug.waitingMute, true);
+  const n = s.cmds.length;
+  s.run(2000);
+  assert.strictEqual(s.last().state, 'SETTLING');
+  assert.strictEqual(s.cmds.length, n);
+  s.extra = { tabMuted: false };
+  s.run(500);
+  assert.strictEqual(s.last().state, 'SETTLING');
+  s.extra = { tabMuted: true };
+  s.run(300);
+  assert.strictEqual(s.last().state, 'ROOM');
+  assert.strictEqual(s.last().debug.waitingMute, false);
+});
+
+test('leaving HUB_ONLY via resume waits for confirmed mute; undefined extra behaves as before', () => {
+  const s = new Sim({ members: ['m1'] });
+  s.extra = { tabMuted: false };
+  s.run(200);
+  s.c.action('hubOnly');
+  s.run(300);
+  assert.strictEqual(s.last().state, 'HUB_ONLY');
+  s.c.action('resume');
+  s.run(1000);
+  assert.strictEqual(s.last().state, 'SETTLING');
+  s.extra = { tabMuted: true };
+  s.run(300);
+  assert.strictEqual(s.last().state, 'ROOM');
+  const s2 = new Sim({ members: ['m1'] });
+  s2.run(200); s2.c.action('hubOnly'); s2.run(300); s2.c.action('resume'); s2.run(400);
+  assert.strictEqual(s2.last().state, 'ROOM');
+});
+
+test('leaving SOUNDCHECK waits for confirmed mute', () => {
+  const s = new Sim({ members: ['m1'] });
+  s.extra = { tabMuted: true };
+  s.run(200);
+  s.c.action('soundCheck');
+  s.extra = { tabMuted: null };
+  s.run(9000);
+  assert.strictEqual(s.last().state, 'SETTLING');
+  assert.strictEqual(s.last().debug.waitingMute, true);
+  s.extra = { tabMuted: true };
+  s.run(300);
+  assert.strictEqual(s.last().state, 'ROOM');
+});
+
+test('member owner gets a fresh open every ownerRefreshMs; not a switch', () => {
+  const s = new Sim({ members: ['m1', 'm2'] });
+  s.speak('m1', 0, 1e9, -30);
+  s.run(1000);
+  assert.strictEqual(s.last().owner, 'm1');
+  const base = s.cmdsOf('m1', 'open').length;
+  const sw = s.switches().length;
+  s.run(3500);
+  const opens = s.cmdsOf('m1', 'open');
+  assert.ok(opens.length - base >= 3 && opens.length - base <= 4, String(opens.length - base));
+  assert.strictEqual(new Set(opens.map((c) => c.gen)).size, opens.length);
+  assert.strictEqual(s.switches().length, sw);
+  assert.strictEqual(s.last().state, 'ROOM');
+  assert.strictEqual(s.last().owner, 'm1');
 });

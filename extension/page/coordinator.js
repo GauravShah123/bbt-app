@@ -11,10 +11,12 @@
     settleMs: 150, ackTimeoutMs: 1000, handoffOverlap: 1,
     learnTicks: 15, enrollTicks: 3, learnSettleMs: 600,
     hbIntervalMs: 500, watchdogMs: 1500,
+    lostDropMs: 2500, ownerRefreshMs: 1000,
     verifyLatencyMs: 1000, newOwnerWindowMs: 3000, verifyWindowMs: 2000,
   });
   const RESEND_MS = 250;
   const SOUNDCHECK_MS = 8000;
+  const SELF_OK_MS = 1000;   // self healthy this long -> auto-resume from PAUSED{unhealthy}
   const PAUSE_KEY = {};
   const NONE = Object.freeze({ fresh: false, bad: false, usable: false, score: -Infinity });
   const FREEZE_STATES = { REMOTE_PENDING: 1, REMOTE: 1, SETTLING: 1, SOUNDCHECK: 1 };
@@ -59,6 +61,10 @@
       this.cmds = [];
       this.sw = null;
       this.pause = null;
+      this.pauseAt = null;
+      this.selfOkSince = null;
+      this.waitMute = false;
+      this.refAt = -Infinity;             // last owner refresh sent
       this.chal = null;
       this.remSince = null;
       this.lastRemAct = -Infinity;
@@ -120,7 +126,7 @@
       if (g !== want) return;                      // member did not reach the wanted state: keep retrying
       this.pend.delete(id);
       this.gate.set(id, g);
-      this.ackedAt.set(id, this._now);
+      if (!pd.refresh) this.ackedAt.set(id, this._now);
       if (g === 0) this.closedAt.set(id, this._now);
     }
 
@@ -149,7 +155,10 @@
       this.lost.add(id);
       if (this.owner === id) this.owner = null;
       if (st === 'PAUSED') {
-        if (this.pause && this.pause.reason !== 'relay') this.pause = { reason: 'ownerLost', id };
+        if (this.pause && this.pause.reason !== 'relay') {
+          if (this.pause.reason !== 'ownerLost') this.pauseAt = null;
+          this.pause = { reason: 'ownerLost', id };
+        }
         return;
       }
       this._pause('ownerLost', id, null);
@@ -202,9 +211,14 @@
     }
 
     // ---- tick ----
-    tick(now, remote) {
+    tick(now, remote, extra) {
       now = num(now, this._now);
       this._now = now;
+      this.waitMute = false;
+      const confirmedMuted = !extra || typeof extra !== 'object' || extra.tabMuted === true;
+      { const sl = this.lv.get(this.selfId);
+        if (sl && now - sl.at <= this.p.levelFreshMs && sl.healthy) { if (this.selfOkSince === null) this.selfOkSince = now; }
+        else this.selfOkSince = null; }
       if (this.stSince === null) this.stSince = now;
       if (this.ownerSince === null) this.ownerSince = now;
       if (this.sc && this.sc.since === null && this.sc.phase === 'listening') this.sc.since = now;
@@ -237,6 +251,7 @@
           if (this._soloCheck(now)) break;
           if (sustained) { this._toRemotePending(now, raIds); break; }
           if (this.owner === null) { this._beginSwitch(this._pickTarget(now), now); break; }
+          this._refreshOwner(now);
           this._select(now);
           enrollable = this.state === 'ROOM';
           break;
@@ -257,6 +272,7 @@
         case 'SETTLING':
           if (this._soloCheck(now)) break;
           if (now - this.stSince >= p.settleMs) {
+            if (!confirmedMuted) { this.waitMute = true; break; }   // never reopen a mic until the tab mute is confirmed
             const t = this._pickTarget(now);
             this._closeAll(t);
             this.owner = t;
@@ -276,6 +292,7 @@
           }
           break;
         }
+        case 'PAUSED': this._pausedStep(now); break;
         case 'SOLO':
           for (const r of this.roster.values()) if (r.ready) { this._toSettling(now); break; }
           if (this.state === 'SOLO') enrollable = true;
@@ -364,7 +381,42 @@
       this._pause('ownerLost', id, now);
     }
 
+    _refreshOwner(now) {
+      const o = this.owner;
+      if (o === null || o === this.selfId || !this.relayUp || !this.roster.has(o)) return;
+      if (this.gate.get(o) !== 1 || this.pend.has(o)) return;
+      const last = Math.max(this.refAt, this.ackedAt.has(o) ? this.ackedAt.get(o) : -Infinity);
+      if (now - last < this.p.ownerRefreshMs) return;
+      this.refAt = now;
+      this._send(o, 'open');
+      this.pend.get(o).refresh = true;
+    }
+
+    _autoResume(reason, id, now) {
+      this.ev.push({ type: 'autoResume', reason, id, at: now });
+      this._toSettling(now);
+    }
+
+    _pausedStep(now) {
+      const pz = this.pause;
+      if (!pz || !this.relayUp) return;
+      if (this.pauseAt === null) this.pauseAt = now;
+      if (pz.reason === 'unhealthy') {
+        if (this.selfOkSince !== null && now - this.selfOkSince >= SELF_OK_MS) this._autoResume('unhealthy', pz.id, now);
+      } else if (pz.reason === 'ackTimeout') {
+        this._closeAll(null);                       // keep re-sending the close
+        if (this._allClosed()) this._autoResume('ackTimeout', pz.id, now);
+      } else if (pz.reason === 'ownerLost') {
+        if (now - this.pauseAt < this.p.lostDropMs) return;
+        const id = pz.id;
+        if (hasId(id)) { this.lost.delete(id); this._drop(id); this.ev.push({ type: 'autoDrop', id, at: now }); }
+        if (this.lost.size > 0) { this.pause = { reason: 'ownerLost', id: this.lost.values().next().value }; this.pauseAt = now; }
+        else this._autoResume('ownerLost', id, now);
+      }
+    }
+
     _pause(reason, id, now) {
+      this.pauseAt = null;
       this.sw = null; this.chal = null; this.sc = null; this.hoWait = false;
       this.pause = id === undefined ? { reason } : { reason, id };
       this._setState('PAUSED', now);
@@ -460,8 +512,11 @@
         idle = true; need = p.idleTakeoverMs;
         target = bestU !== null ? bestU : bestA;
         if (target === null) {
-          if (owner !== self && !this._info(self, now).bad) target = self;
-          else pauseIntent = true;
+          const sl = this.lv.get(self);
+          const selfSick = !!sl && !sl.healthy && this._info(self, now).fresh;   // a muted self is not sick
+          if (selfSick) pauseIntent = true;
+          else if (owner !== self) target = self;
+          // else: self owns the mic and is merely user-muted; Meet's mute silences it. Stay.
         }
       } else if (!oi.usable) {
         idle = true; need = p.idleTakeoverMs; target = bestU;
@@ -556,7 +611,7 @@
       if (this.state === 'SOUNDCHECK') kind = 'remote';
       else {
         const at = this.ackedAt.get(o);
-        if (o === null || this.gate.get(o) !== 1 || this.pend.has(o) || at === undefined || now - at < p.learnSettleMs) {
+        if (o === null || this.gate.get(o) !== 1 || (this.pend.has(o) && !this.pend.get(o).refresh) || at === undefined || now - at < p.learnSettleMs) {
           this.cnt.clear(); return;
         }
         if (o === this.selfId || this._hasCsrc(o)) kind = 'remote';
@@ -616,7 +671,7 @@
         actions: this._actions(),
         remote: { enrolled: this.remoteIds.size, identified: this.identified, learnedRoom: this.roomOf.size },
         events,
-        debug: { gen: this.gen, pending: this.pend.size, lost: this.lost.size, relayUp: this.relayUp, members: this.roster.size, now },
+        debug: { waitingMute: this.waitMute, gen: this.gen, pending: this.pend.size, lost: this.lost.size, relayUp: this.relayUp, members: this.roster.size, now },
       };
     }
   }
