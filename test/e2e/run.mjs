@@ -16,6 +16,11 @@ const ROOT = path.resolve(here, '../..');
 const EXT = path.join(ROOT, 'extension');
 const FAKE_HTML = fs.readFileSync(path.join(here, 'fake-meet.html'), 'utf8');
 const MEET_URL = 'https://meet.google.com/abc-defg-hij';
+// E2E_CSP=strict: Google-style strict CSP (nonce + strict-dynamic + Trusted Types) and connect-src 'self',
+// which blocks a direct relay socket from the page origin and forces the SW proxy if the isolated world is subject to it.
+const CSP_MODE = process.env.E2E_CSP === 'strict';
+const CSP_HEADER = "script-src 'nonce-e2e' 'strict-dynamic' 'unsafe-eval'; object-src 'none'; base-uri 'self'; " +
+  "require-trusted-types-for 'script'; connect-src 'self'";
 const TOKEN = 'testtoken';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -80,7 +85,9 @@ async function makeLaptop(i) {
     throw new Error('SW chrome APIs unavailable');
   }
   await context.route('https://meet.google.com/**', (route) =>
-    route.fulfill({ status: 200, contentType: 'text/html', body: FAKE_HTML }));
+    route.fulfill(CSP_MODE
+      ? { status: 200, contentType: 'text/html', headers: { 'content-security-policy': CSP_HEADER }, body: FAKE_HTML.replace(/<script>/g, '<script nonce="e2e">') }
+      : { status: 200, contentType: 'text/html', body: FAKE_HTML }));
   laptops.push(lp);
   return lp;
 }
@@ -215,6 +222,16 @@ async function main() {
   if (!ok3) return;
   const idA = a3.you, idB = all3[1].you, idC = all3[2].you;
 
+  // Step 3b: which meter / relay transport actually ran (matters under Meet's CSP)
+  const paths = await Promise.all([A, B, C].map((lp) => lp.page.evaluate(() => {
+    const NS = window.__hybridAudio; const m = NS.engine.measure;
+    return { meter: m.meter, ctx: m.ctxState };
+  })));
+  const st3 = await poll(async () => { const x = await lastStatus(A); return x && x.via ? x : null; }, 3000) || await lastStatus(A);
+  report(`3b audio meter + relay transport${CSP_MODE ? ' (strict CSP)' : ''}`,
+    paths.every((p) => p.meter === 'worklet' || p.meter === 'script') && !!(st3 && st3.via),
+    JSON.stringify({ paths, via: st3 && st3.via }));
+
   // Step 4: B loud -> owner B
   const t4 = Date.now();
   await setLevel(B, LOUD);
@@ -225,6 +242,7 @@ async function main() {
   }, 2000);
   const dt4 = Date.now() - t4;
   report('4a switch: owner B, gates B=1 A=0 C=0 within 2s', !!ok4, `${dt4}ms ${fmt(s4 || [])}`);
+  await poll(async () => (await safeDbg(A)).state === 'ROOM', 2000); // switch event is emitted when the handoff completes
   const logA = await getLog(A);
   if (logA) {
     const L = logA.log;

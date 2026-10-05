@@ -8,6 +8,7 @@ import { RoomCore, MemoryStore, validateJoin } from './src/room-core.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const TOKEN = process.env.TEAM_TOKEN || '';
+const GRACE_MS = Number(process.env.GRACE_MS) > 0 ? Number(process.env.GRACE_MS) : undefined; // test knob; default = room-core's 30 s
 const MAX_MINUTES = Number(process.env.MAX_MINUTES_PER_DAY) > 0 ? Number(process.env.MAX_MINUTES_PER_DAY) : 240;
 if (!TOKEN) console.warn('WARNING: TEAM_TOKEN is not set; any token is accepted.');
 
@@ -33,7 +34,7 @@ server.on('upgrade', (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     let core = rooms.get(key);
-    if (!core) { core = new RoomCore({ token: TOKEN, maxMinutes: MAX_MINUTES, store }); rooms.set(key, core); }
+    if (!core) { core = new RoomCore({ token: TOKEN, maxMinutes: MAX_MINUTES, store, graceMs: GRACE_MS }); rooms.set(key, core); }
     const sock = {
       send: (text) => { if (ws.readyState === ws.OPEN) ws.send(text); },
       close: (code, reason) => ws.close(code, reason),
