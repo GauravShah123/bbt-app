@@ -19,6 +19,8 @@ No echo, no doubled voice, no manual muting. Remote participants install nothing
 - **Breakout with only one laptop left:** it behaves like plain Meet.
 - **What's touched.** Meet's audio itself is never replaced. The extension only gates in-room mic input and mutes in-room speakers.
 
+**Deploying? Follow [`docs/DEPLOY.md`](docs/DEPLOY.md)** (relay, team build of the extension, install). The sections below are the reference.
+
 ## Install (each in-room laptop, ~1 minute)
 
 1. Get the code: `git clone` this repo, or download the ZIP and unzip it.

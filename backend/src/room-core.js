@@ -15,6 +15,8 @@ const PARAM_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const STATE_RE = /^[A-Za-z_]{1,16}$/;
 const MAX_CFG_PARAMS = 20;
 
+export const AUTO_GRANT_WINDOW_MS = 5000;
+
 export function validateJoin({ key, cid, claim, v }) {
   return KEY_RE.test(key || '') && CID_RE.test(cid || '') &&
     (claim === '0' || claim === '1') && v === '2';
@@ -92,6 +94,7 @@ export class RoomCore {
     this.rate = new Map();     // sock -> { sec, count }
     this.lastSig = '';
     this.lastAccrue = null;
+    this.autoGrant = null;     // { cid, at } hub granted without a claim (first to reconnect)
   }
 
   get occupied() { return this.clients.size > 0; }
@@ -144,11 +147,21 @@ export class RoomCore {
     if (this.hub === cid) {
       // Reconnect of the current hub (duplicate cid): keeps the role.
     } else if (this.hub === null) {
+      const claimed = claim === 1 || claim === '1';
       if (this.hubLost && this.hubLost.cid === cid) {
         this.grantHub(cid);
-      } else if (!this.hubLost && (claim === 1 || claim === '1' || this.clients.size === 1)) {
+        this.autoGrant = null;
+      } else if (!this.hubLost && (claimed || this.clients.size === 1)) {
         this.grantHub(cid);
+        // Granted only because it reconnected first (e.g. after a relay restart): the real Hub
+        // may still be on its way back. Remember it so a claimer can take the role back.
+        this.autoGrant = claimed ? null : { cid, at: t };
       }
+    } else if ((claim === 1 || claim === '1') && this.autoGrant && this.autoGrant.cid === this.hub &&
+               t - this.autoGrant.at < AUTO_GRANT_WINDOW_MS) {
+      // The previous Hub reconnected shortly after someone else was auto-granted: hand it back.
+      this.autoGrant = null;
+      this.grantHub(cid);
     }
 
     safeSend(sock, {

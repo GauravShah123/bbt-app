@@ -61,11 +61,12 @@ test('first client becomes hub; welcome has sid/you/hub/epoch/roster', () => {
   assert.equal(core.hub, A);
 });
 
-test('second client without claim is a member; claim=1 does not steal a live hub', () => {
-  const { join, core } = setup();
+test('second client without claim is a member; claim=1 does not steal an established hub', () => {
+  const { join, core, clock } = setup();
   join(A);
   const b = join(B, 0);
   assert.equal(b.last('welcome').hub, A);
+  clock.advance(6000); // past the auto-grant hand-back window
   const c = join(C, 1);
   assert.equal(c.last('welcome').hub, A);
   assert.equal(core.epoch, 1);
@@ -544,4 +545,29 @@ test('welcome roster for a late joiner lists everyone ordered by n', () => {
     { cid: A, n: 1, ready: 0 }, { cid: B, n: 2, ready: 1 }, { cid: C, n: 3, ready: 0 },
   ]);
   assert.equal(a.last('roster').roster.length, 3);
+});
+
+// ---- Regression: relay restart must not move the Hub role to whoever reconnects first ----
+test('auto-granted hub is handed back to a claiming hub within the window', () => {
+  let t = 1_000_000;
+  const core = new RoomCore({ now: () => t, token: '' });
+  const mk = () => { const s = { sent: [], closed: null }; s.send = (x) => s.sent.push(JSON.parse(x)); s.close = (c) => { s.closed = c; }; return s; };
+  const member = mk(), hub = mk();
+  core.join(member, { cid: 'MMMMMMMMMMMMMMMM', tok: '', claim: 0 }); // reconnects first after restart
+  assert.equal(core.hub, 'MMMMMMMMMMMMMMMM');
+  const e1 = core.epoch;
+  t += 1500;
+  core.join(hub, { cid: 'HHHHHHHHHHHHHHHH', tok: '', claim: 1 });  // the real hub comes back
+  assert.equal(core.hub, 'HHHHHHHHHHHHHHHH');
+  assert.ok(core.epoch > e1);
+});
+
+test('claim after the window does not steal an established hub', () => {
+  let t = 1_000_000;
+  const core = new RoomCore({ now: () => t, token: '' });
+  const mk = () => { const s = { sent: [] }; s.send = (x) => s.sent.push(JSON.parse(x)); s.close = () => {}; return s; };
+  core.join(mk(), { cid: 'MMMMMMMMMMMMMMMM', tok: '', claim: 0 });
+  t += 6000;
+  core.join(mk(), { cid: 'HHHHHHHHHHHHHHHH', tok: '', claim: 1 });
+  assert.equal(core.hub, 'MMMMMMMMMMMMMMMM');
 });

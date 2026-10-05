@@ -313,6 +313,8 @@
         }
       } catch (err) { warn('beginRole.create', err); }
       transitioning = false;
+      // Reconnects must claim the role we hold now, not the one we joined with.
+      try { if (client && client.opts) client.opts.claim = role === 'hub' ? 1 : 0; } catch (_) {}
       if (prevRole !== role) sendJoined();
       maybeSendReady(true);
       sendStatus(true);
